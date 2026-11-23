@@ -1,0 +1,10 @@
+﻿node_modules
+.next
+.vercel
+.env
+.env*.local
+next-env.d.ts
+*.tsbuildinfo
+.nmcgen-work
+__pycache__/
+*.pyc
