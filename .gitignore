@@ -8,3 +8,6 @@ next-env.d.ts
 .nmcgen-work
 __pycache__/
 *.pyc
+/dist/
+.vinext/
+.cloudflare/
