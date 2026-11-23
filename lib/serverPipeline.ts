@@ -16,7 +16,27 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-export const WORK_ROOT = path.resolve(process.cwd(), ".nmcgen-work");
+export function isCloudflareWorkers(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    typeof navigator.userAgent === "string" &&
+    navigator.userAgent === "Cloudflare-Workers"
+  );
+}
+
+export function isServerlessRuntime(): boolean {
+  return Boolean(
+    isCloudflareWorkers() ||
+      process?.env?.VERCEL ||
+      process?.env?.AWS_LAMBDA_FUNCTION_NAME ||
+      process?.env?.CF_PAGES ||
+      process?.env?.CLOUDFLARE_WORKERS,
+  );
+}
+
+export function getWorkRoot(): string {
+  return path.resolve(process.cwd(), ".nmcgen-work");
+}
 
 export function isValidJobId(id: string): boolean {
   return /^[a-zA-Z0-9_-]{8,64}$/.test(id);
@@ -52,7 +72,7 @@ export function defaultCapCutDraftsDir(): string {
 }
 
 export async function detectRuntime(): Promise<RuntimeStatus> {
-  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+  const isServerless = isServerlessRuntime();
   const [ff, fp, pyBin] = isServerless
     ? [{ ok: false, stdout: "" }, { ok: false, stdout: "" }, null]
     : await Promise.all([
@@ -77,20 +97,27 @@ export async function detectRuntime(): Promise<RuntimeStatus> {
     ffmpegVersion: ff.ok ? ff.stdout.split(/\r?\n/)[0]?.slice(0, 80) : undefined,
     defaultCapCutDir: isServerless ? undefined : defaultCapCutDraftsDir(),
     serverKeys: {
-      gemini: Boolean(process.env.GEMINI_API_KEY),
-      geminiImage: Boolean(process.env.GEMINI_IMAGE_API_KEY || process.env.GEMINI_API_KEY),
-      openai: Boolean(process.env.OPENAI_API_KEY),
+      gemini: Boolean(process?.env?.GEMINI_API_KEY),
+      geminiImage: Boolean(process?.env?.GEMINI_IMAGE_API_KEY || process?.env?.GEMINI_API_KEY),
+      openai: Boolean(process?.env?.OPENAI_API_KEY),
     },
   };
 }
 
 export async function readBundledScripts(): Promise<{ renderPy: string; capcutPy: string }> {
-  const scriptsDir = path.resolve(process.cwd(), "scripts");
-  const [renderPy, capcutPy] = await Promise.all([
-    readFile(path.join(scriptsDir, "render_ffmpeg.py"), "utf-8"),
-    readFile(path.join(scriptsDir, "build_capcut_draft.py"), "utf-8"),
-  ]);
-  return { renderPy, capcutPy };
+  if (isServerlessRuntime()) {
+    return { renderPy: "", capcutPy: "" };
+  }
+  try {
+    const scriptsDir = path.resolve(process.cwd(), "public", "scripts");
+    const [renderPy, capcutPy] = await Promise.all([
+      readFile(path.join(scriptsDir, "render_ffmpeg.py"), "utf-8"),
+      readFile(path.join(scriptsDir, "build_capcut_draft.py"), "utf-8"),
+    ]);
+    return { renderPy, capcutPy };
+  } catch {
+    return { renderPy: "", capcutPy: "" };
+  }
 }
 
 function decodeDataUrlToBuffer(dataUrl: string): { ext: string; buf: Buffer } | null {
@@ -120,7 +147,7 @@ export async function stageProjectWorkspace(project: NmcProject): Promise<{
   manifestPath: string;
 }> {
   const jobId = `job_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  const jobDir = path.join(WORK_ROOT, jobId);
+  const jobDir = path.join(getWorkRoot(), jobId);
   const mediaDir = path.join(jobDir, "media");
   await mkdir(mediaDir, { recursive: true });
 

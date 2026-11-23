@@ -49,7 +49,7 @@ export async function POST(req: Request) {
   try {
     const { jobId, jobDir, manifestPath } = await stageProjectWorkspace(project);
     const outPath = path.join(jobDir, "final.mp4");
-    const scriptPath = path.resolve(process.cwd(), "scripts", "render_ffmpeg.py");
+    const scriptPath = path.resolve(process.cwd(), "public", "scripts", "render_ffmpeg.py");
 
     const { stdout } = await execFileAsync(
       pyBin,

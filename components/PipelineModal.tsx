@@ -143,10 +143,12 @@ export default function PipelineModal({
     setBusy("Menyiapkan Bundle ZIP (skrip FFmpeg + pyCapCut + media + SRT)...");
     setError("");
     try {
-      const res = await fetch("/api/runtime?scripts=1");
-      const data = await res.json();
-      const renderPy = data?.scripts?.renderPy || "";
-      const capcutPy = data?.scripts?.capcutPy || "";
+      const [renderRes, capcutRes] = await Promise.all([
+        fetch("/scripts/render_ffmpeg.py"),
+        fetch("/scripts/build_capcut_draft.py"),
+      ]);
+      const renderPy = renderRes.ok ? await renderRes.text() : "";
+      const capcutPy = capcutRes.ok ? await capcutRes.text() : "";
       const zipBytes = buildOfflineBundleZip(project, renderPy, capcutPy);
       const safeName =
         (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") + "-bundle.zip";

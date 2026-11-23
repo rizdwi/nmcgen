@@ -60,7 +60,7 @@ export async function POST(req: Request) {
 
   try {
     const { manifestPath } = await stageProjectWorkspace(project);
-    const scriptPath = path.resolve(process.cwd(), "scripts", "build_capcut_draft.py");
+    const scriptPath = path.resolve(process.cwd(), "public", "scripts", "build_capcut_draft.py");
 
     const { stdout } = await execFileAsync(
       pyBin,

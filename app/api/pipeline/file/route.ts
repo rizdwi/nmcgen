@@ -1,8 +1,15 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { isValidJobId, WORK_ROOT } from "@/lib/serverPipeline";
+import { getWorkRoot, isServerlessRuntime, isValidJobId } from "@/lib/serverPipeline";
 
 export async function GET(req: Request) {
+  if (isServerlessRuntime()) {
+    return Response.json(
+      { ok: false, code: "SERVERLESS_FALLBACK", error: "Berkas render lokal tidak tersedia di server serverless." },
+      { status: 501 },
+    );
+  }
+
   const url = new URL(req.url);
   const job = url.searchParams.get("job") || "";
   const rawName = url.searchParams.get("name") || "nmcgen-final.mp4";
@@ -12,9 +19,10 @@ export async function GET(req: Request) {
     return Response.json({ ok: false, error: "ID render tidak valid." }, { status: 400 });
   }
 
-  const filePath = path.join(WORK_ROOT, job, "final.mp4");
+  const workRoot = getWorkRoot();
+  const filePath = path.join(workRoot, job, "final.mp4");
   const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(WORK_ROOT + path.sep)) {
+  if (!resolved.startsWith(workRoot + path.sep)) {
     return Response.json({ ok: false, error: "Akses jalur berkas ditolak." }, { status: 403 });
   }
 
