@@ -6,6 +6,9 @@ import {
   buildSrt,
   composeSegmentPrompt,
   estimateDialogueSeconds,
+  getPrimaryScript,
+  getProjectCover,
+  updateProjectMeta,
   validateProject,
 } from "./validator.ts";
 import { buildZip } from "./zip.ts";
@@ -74,5 +77,26 @@ assert.equal(zipBytes[0], 0x50);
 assert.equal(zipBytes[1], 0x4b);
 assert.equal(zipBytes[2], 0x03);
 assert.equal(zipBytes[3], 0x04);
+
+// 8. Dashboard project metadata edit and cover extraction
+const editedSample = updateProjectMeta(sample, {
+  name: "Drama Warung Malam",
+  aspectRatio: "9:16",
+  premise: "Pertemuan tak terduga di bawah hujan.",
+  visualStyle: "Cinematic 9:16 neon rain",
+});
+assert.equal(editedSample.name, "Drama Warung Malam");
+assert.equal(getPrimaryScript(editedSample)?.aspectRatio, "9:16");
+assert.equal(getPrimaryScript(editedSample)?.premise, "Pertemuan tak terduga di bawah hujan.");
+assert.equal(getProjectCover(editedSample), null);
+
+const editedEmpty = updateProjectMeta(empty, {
+  name: "Episode Perdana",
+  aspectRatio: "9:16",
+  premise: "Premis baru dari dashboard.",
+});
+assert.equal(editedEmpty.name, "Episode Perdana");
+assert.equal(getPrimaryScript(editedEmpty)?.aspectRatio, "9:16");
+assert.equal(getPrimaryScript(editedEmpty)?.premise, "Premis baru dari dashboard.");
 
 console.log("nmcGen pipeline tests: all passed");

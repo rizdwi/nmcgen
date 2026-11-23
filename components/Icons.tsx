@@ -98,3 +98,39 @@ export function LayoutIcon({ size = 15 }: IconProps) {
     </svg>
   );
 }
+
+export function DashboardIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="9" y="2" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="2" y="9" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="9" y="9" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+export function EditIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M11.2 2.4l2.4 2.4-7.8 7.8-3.1.7.7-3.1 7.8-7.8z"
+        stroke="currentColor"
+        strokeWidth="1.35"
+        strokeLinejoin="round"
+      />
+      <path d="M9.6 4l2.4 2.4" stroke="currentColor" strokeWidth="1.35" />
+    </svg>
+  );
+}
+
+export function TrashIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2.5 4.25h11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="square" />
+      <path d="M6 4.25V2.75h4v1.5" stroke="currentColor" strokeWidth="1.35" />
+      <path d="M4.25 4.25l.6 9h6.3l.6-9" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" />
+      <path d="M6.75 7v4M9.25 7v4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="square" />
+    </svg>
+  );
+}

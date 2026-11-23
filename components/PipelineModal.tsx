@@ -188,7 +188,7 @@ export default function PipelineModal({
         </div>
 
         <div className="modalBody">
-          {/* Summary counts — exact measured numbers from current canvas */}
+          {/* Summary counts: exact measured numbers from current canvas */}
           <div className="nodeMetaRow">
             <span className="metaTag mono">{report.orderedSegmentIds.length} segmen terhubung</span>
             <span className="metaTag mono">Total {report.totalDurationSec} dtk</span>

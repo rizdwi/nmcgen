@@ -8,11 +8,78 @@ import type {
   ValidationIssue,
   ValidationReport,
 } from "./types.ts";
-import { resolutionFor } from "./presets.ts";
+import { createDefaultNode, resolutionFor } from "./presets.ts";
 
 export function getPrimaryScript(project: NmcProject): ScriptNodeData | null {
   const n = project.nodes.find((node) => node.kind === "script");
   return n && n.data.kind === "script" ? n.data : null;
+}
+
+export function getProjectCover(project: NmcProject): string | null {
+  for (const segNode of getOrderedSegments(project)) {
+    if (segNode.data.kind !== "segment") continue;
+    const adopted = getAdoptedMedia(segNode.data);
+    if (adopted && adopted.kind === "image" && adopted.dataUrl) {
+      return adopted.dataUrl;
+    }
+  }
+  for (const node of project.nodes) {
+    if (node.data.kind === "asset" && node.data.imageDataUrl) {
+      return node.data.imageDataUrl;
+    }
+  }
+  return null;
+}
+
+export function updateProjectMeta(
+  project: NmcProject,
+  patch: {
+    name: string;
+    premise?: string;
+    aspectRatio?: AspectRatio;
+    visualStyle?: string;
+  },
+): NmcProject {
+  const cleanName = patch.name.trim() || project.name || "Proyek Baru";
+  const hasScript = project.nodes.some((n) => n.kind === "script");
+  let nextNodes = project.nodes;
+
+  if (hasScript) {
+    let updatedFirst = false;
+    nextNodes = project.nodes.map((node) => {
+      if (!updatedFirst && node.kind === "script" && node.data.kind === "script") {
+        updatedFirst = true;
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            premise: patch.premise !== undefined ? patch.premise : node.data.premise,
+            aspectRatio: patch.aspectRatio ?? node.data.aspectRatio,
+            visualStyle: patch.visualStyle !== undefined ? patch.visualStyle : node.data.visualStyle,
+          },
+        };
+      }
+      return node;
+    });
+  } else if (patch.premise?.trim() || patch.visualStyle?.trim() || patch.aspectRatio) {
+    const created = createDefaultNode("script", 40, 80, 1);
+    if (created.data.kind === "script") {
+      created.data = {
+        ...created.data,
+        premise: patch.premise ?? "",
+        aspectRatio: patch.aspectRatio ?? "16:9",
+        visualStyle: patch.visualStyle ?? created.data.visualStyle,
+      };
+    }
+    nextNodes = [created, ...project.nodes];
+  }
+
+  return {
+    ...project,
+    name: cleanName,
+    updatedAt: Date.now(),
+    nodes: nextNodes,
+  };
 }
 
 export function getBoundAssets(project: NmcProject, segmentNodeId: string): CanvasNode[] {

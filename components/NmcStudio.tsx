@@ -19,16 +19,20 @@ import {
   uid,
 } from "@/lib/presets";
 import { downloadBlob, loadSettings, projectDb, saveSettings } from "@/lib/storage";
-import { autoArrangeNodes, validateProject } from "@/lib/validator";
+import { autoArrangeNodes, updateProjectMeta, validateProject } from "@/lib/validator";
 import CanvasBoard from "./CanvasBoard";
 import InspectorDrawer from "./InspectorDrawer";
 import PipelineModal from "./PipelineModal";
+import ProjectDashboard, { type ProjectMetaDraft } from "./ProjectDashboard";
 import SettingsModal from "./SettingsModal";
-import { CheckIcon, NodeKindIcon, PlusIcon, SlidersIcon } from "./Icons";
+import { CheckIcon, DashboardIcon, NodeKindIcon, PlusIcon, SlidersIcon } from "./Icons";
 
 const STAGE_ORDER: NodeKind[] = ["script", "asset", "segment", "audio", "assembly", "export"];
+const SEEDED_KEY = "nmcgen.seeded";
 
 export default function NmcStudio() {
+  const [screen, setScreen] = useState<"dashboard" | "studio">("dashboard");
+  const [loadingProjects, setLoadingProjects] = useState(true);
   const [settings, setSettings] = useState<NmcSettings | null>(null);
   const [projects, setProjects] = useState<NmcProject[]>([]);
   const [project, setProject] = useState<NmcProject | null>(null);
@@ -42,6 +46,11 @@ export default function NmcStudio() {
   const [loadError, setLoadError] = useState("");
   const importRef = useRef<HTMLInputElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestProjectRef = useRef<NmcProject | null>(null);
+
+  useEffect(() => {
+    latestProjectRef.current = project;
+  }, [project]);
 
   const refreshRuntime = useCallback(async () => {
     try {
@@ -72,24 +81,32 @@ export default function NmcStudio() {
     (async () => {
       try {
         const list = await projectDb.list();
-        if (list.length === 0) {
+        const alreadySeeded = typeof window !== "undefined" && localStorage.getItem(SEEDED_KEY) === "1";
+        if (list.length === 0 && !alreadySeeded) {
           const sample = createSampleProject();
           await projectDb.put(sample);
+          try {
+            localStorage.setItem(SEEDED_KEY, "1");
+          } catch {
+            // ignore storage quota errors
+          }
           setProjects([sample]);
           setProject(sample);
           setSelectedNodeId(sample.nodes[0]?.id ?? null);
         } else {
           const sorted = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
-          const chosen = sorted.find((x) => x.id === loadedSettings.lastProjectId) ?? sorted[0];
+          const chosen = sorted.find((x) => x.id === loadedSettings.lastProjectId) ?? sorted[0] ?? null;
           setProjects(sorted);
           setProject(chosen);
-          setSelectedNodeId(chosen.nodes[0]?.id ?? null);
+          setSelectedNodeId(chosen?.nodes[0]?.id ?? null);
         }
       } catch (err) {
         setLoadError(`Gagal memuat database lokal browser: ${(err as Error).message}`);
         const fallback = createSampleProject();
         setProjects([fallback]);
         setProject(fallback);
+      } finally {
+        setLoadingProjects(false);
       }
     })();
   }, [refreshRuntime]);
@@ -140,7 +157,40 @@ export default function NmcStudio() {
     return map;
   }, [report]);
 
+  const flushPendingSave = useCallback(() => {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+      const latest = latestProjectRef.current;
+      if (latest) {
+        projectDb
+          .put(latest)
+          .then(() => setSaveState("saved"))
+          .catch(() => setSaveState("error"));
+      }
+    }
+  }, []);
+
+  const handleOpenProjectFromDashboard = (id: string) => {
+    const found = projects.find((p) => p.id === id);
+    if (!found) return;
+    setProject(found);
+    setSelectedNodeId(found.nodes[0]?.id ?? null);
+    setSelectedEdgeId(null);
+    setScreen("studio");
+    updateSettings((s) => ({ ...s, lastProjectId: found.id }));
+  };
+
+  const handleBackToDashboard = () => {
+    flushPendingSave();
+    setPipelineOpen(false);
+    setSelectedEdgeId(null);
+    setProjects((prev) => [...prev].sort((a, b) => b.updatedAt - a.updatedAt));
+    setScreen("dashboard");
+  };
+
   const handleSwitchProject = (id: string) => {
+    flushPendingSave();
     const found = projects.find((p) => p.id === id);
     if (!found) return;
     setProject(found);
@@ -150,6 +200,7 @@ export default function NmcStudio() {
   };
 
   const handleNewProject = async () => {
+    flushPendingSave();
     const fresh = createEmptyProject(`Proyek ${projects.length + 1}`);
     await projectDb.put(fresh).catch(() => {});
     setProjects((prev) => [fresh, ...prev]);
@@ -157,6 +208,61 @@ export default function NmcStudio() {
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
     updateSettings((s) => ({ ...s, lastProjectId: fresh.id }));
+  };
+
+  const handleCreateProjectFromDashboard = async (meta: ProjectMetaDraft, openAfter: boolean) => {
+    const base = createEmptyProject(meta.name.trim() || `Proyek ${projects.length + 1}`);
+    const fresh = updateProjectMeta(base, meta);
+    await projectDb.put(fresh);
+    setProjects((prev) => [fresh, ...prev]);
+    if (openAfter) {
+      setProject(fresh);
+      setSelectedNodeId(fresh.nodes[0]?.id ?? null);
+      setSelectedEdgeId(null);
+      setScreen("studio");
+      updateSettings((s) => ({ ...s, lastProjectId: fresh.id }));
+    }
+  };
+
+  const handleCreateSampleProject = async () => {
+    const sample = { ...createSampleProject(), id: uid(), updatedAt: Date.now() };
+    await projectDb.put(sample).catch(() => {});
+    setProjects((prev) => [sample, ...prev]);
+  };
+
+  const handleUpdateProjectMeta = async (projectId: string, meta: ProjectMetaDraft) => {
+    const target = projects.find((p) => p.id === projectId);
+    if (!target) return;
+    const updated = updateProjectMeta(target, meta);
+    await projectDb.put(updated);
+    setProjects((prev) =>
+      prev.map((p) => (p.id === projectId ? updated : p)).sort((a, b) => b.updatedAt - a.updatedAt),
+    );
+    if (project?.id === projectId) {
+      setProject(updated);
+    }
+  };
+
+  const handleDeleteProjectById = async (projectId: string) => {
+    if (project?.id === projectId && saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    try {
+      localStorage.setItem(SEEDED_KEY, "1");
+    } catch {
+      // ignore storage errors
+    }
+    await projectDb.del(projectId).catch(() => {});
+    const remaining = projects.filter((p) => p.id !== projectId);
+    setProjects(remaining);
+    if (project?.id === projectId) {
+      const nextProj = remaining[0] ?? null;
+      setProject(nextProj);
+      setSelectedNodeId(nextProj?.nodes[0]?.id ?? null);
+      setSelectedEdgeId(null);
+      if (!nextProj) setScreen("dashboard");
+    }
   };
 
   const handleLoadSampleIntoCurrent = () => {
@@ -167,23 +273,6 @@ export default function NmcStudio() {
       name: prev.name === "Proyek Baru" ? sample.name : prev.name,
     }));
     setSelectedNodeId(sample.nodes[0]?.id ?? null);
-  };
-
-  const handleDeleteCurrentProject = async () => {
-    if (!project) return;
-    const remaining = projects.filter((p) => p.id !== project.id);
-    await projectDb.del(project.id).catch(() => {});
-    if (remaining.length === 0) {
-      const fresh = createEmptyProject("Proyek Baru");
-      await projectDb.put(fresh).catch(() => {});
-      setProjects([fresh]);
-      setProject(fresh);
-      setSelectedNodeId(null);
-    } else {
-      setProjects(remaining);
-      setProject(remaining[0]);
-      setSelectedNodeId(remaining[0].nodes[0]?.id ?? null);
-    }
   };
 
   const handleExportJson = () => {
@@ -386,11 +475,39 @@ export default function NmcStudio() {
     [commitProject],
   );
 
-  if (!project || !settings || !report) {
+  if (!settings) {
     return (
       <main className="studioShell" style={{ placeItems: "center" }}>
         <p style={{ color: "var(--ink-muted)" }}>Memuat ruang kerja nmcGen...</p>
       </main>
+    );
+  }
+
+  if (screen === "dashboard" || !project || !report) {
+    return (
+      <>
+        <ProjectDashboard
+          projects={projects}
+          loading={loadingProjects}
+          loadError={loadError}
+          runtime={runtime}
+          onOpenProject={handleOpenProjectFromDashboard}
+          onCreateProject={handleCreateProjectFromDashboard}
+          onCreateSampleProject={handleCreateSampleProject}
+          onUpdateProjectMeta={handleUpdateProjectMeta}
+          onDeleteProject={handleDeleteProjectById}
+          onImportJson={handleImportJson}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
+        <SettingsModal
+          open={settingsOpen}
+          settings={settings}
+          runtime={runtime}
+          onUpdateSettings={updateSettings}
+          onRefreshRuntime={refreshRuntime}
+          onClose={() => setSettingsOpen(false)}
+        />
+      </>
     );
   }
 
@@ -404,12 +521,27 @@ export default function NmcStudio() {
     <div className="studioShell">
       <header className="topBar">
         <div className="topLeft">
-          <div className="brandMark">
+          <button
+            type="button"
+            className="brandBtn"
+            onClick={handleBackToDashboard}
+            title="Kembali ke Dashboard Proyek"
+          >
             <span className="brandGlyph mono" aria-hidden="true">
               nG
             </span>
             <h1 className="brandTitle">nmcGen</h1>
-          </div>
+          </button>
+
+          <button
+            type="button"
+            className="btn btnSm"
+            onClick={handleBackToDashboard}
+            title="Kembali ke daftar kartu proyek"
+          >
+            <DashboardIcon size={14} />
+            <span>Dashboard</span>
+          </button>
 
           <div className="projectSelectWrap">
             <label htmlFor="project-select" className="srOnly">
@@ -559,8 +691,9 @@ export default function NmcStudio() {
                     Muat Contoh Raka &amp; Dina
                   </button>
                 ) : null}
-                <button type="button" className="btn btnDanger btnSm" onClick={handleDeleteCurrentProject}>
-                  Hapus Proyek
+                <button type="button" className="btn btnSm" onClick={handleBackToDashboard}>
+                  <DashboardIcon size={14} />
+                  <span>Kelola di Dashboard</span>
                 </button>
               </div>
             </div>
