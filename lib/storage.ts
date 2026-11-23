@@ -107,12 +107,33 @@ export function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
+export interface AiCallResponse {
+  ok: boolean;
+  text?: string;
+  image?: string;
+  error?: string;
+  usedModel?: string;
+  fallbackNotes?: string[];
+  discovered?: {
+    textModels: string[];
+    imageModels: string[];
+    totalCount: number;
+    fetchedAt: number;
+  };
+}
+
 export async function callAi(
   profile: ProviderProfile,
-  op: "test" | "text" | "image",
-  payload: { system?: string; prompt?: string; aspectRatio?: "9:16" | "16:9"; referenceImages?: string[] } = {},
-): Promise<{ ok: boolean; text?: string; image?: string; error?: string }> {
-  const key = getApiKey(profile.id);
+  op: "test" | "discover" | "text" | "image",
+  payload: {
+    key?: string;
+    system?: string;
+    prompt?: string;
+    aspectRatio?: "9:16" | "16:9";
+    referenceImages?: string[];
+  } = {},
+): Promise<AiCallResponse> {
+  const key = payload.key !== undefined ? payload.key : getApiKey(profile.id);
   const res = await fetch("/api/ai", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -120,7 +141,10 @@ export async function callAi(
       profile,
       key: key || undefined,
       op,
-      ...payload,
+      system: payload.system,
+      prompt: payload.prompt,
+      aspectRatio: payload.aspectRatio,
+      referenceImages: payload.referenceImages,
     }),
   });
   return res.json();

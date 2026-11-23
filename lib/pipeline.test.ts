@@ -12,6 +12,14 @@ import {
   validateProject,
 } from "./validator.ts";
 import { buildZip } from "./zip.ts";
+import {
+  buildCandidateChain,
+  classifyAndRankModels,
+  detectProviderKindFromKey,
+  isImagenModel,
+  openAiImageSizeForModel,
+  shouldSwitchModel,
+} from "./modelRouter.ts";
 
 // 1. Sample project validates with zero hard errors and expected warnings for missing images
 const sample = createSampleProject();
@@ -98,5 +106,66 @@ const editedEmpty = updateProjectMeta(empty, {
 assert.equal(editedEmpty.name, "Episode Perdana");
 assert.equal(getPrimaryScript(editedEmpty)?.aspectRatio, "9:16");
 assert.equal(getPrimaryScript(editedEmpty)?.premise, "Premis baru dari dashboard.");
+
+// 9. Auto model discovery, provider key detection, and rate-limit fallback router
+assert.equal(detectProviderKindFromKey("AIzaSyDummyKey1234567890abcd"), "Gemini");
+assert.equal(detectProviderKindFromKey("sk-ant-api03-dummy1234567890"), "Anthropic");
+assert.equal(detectProviderKindFromKey("sk-proj-dummyKey1234567890abcd"), "OpenAI");
+assert.equal(detectProviderKindFromKey("local-custom-token"), null);
+
+const geminiDiscovered = classifyAndRankModels("Gemini", [
+  { id: "models/gemini-embedding-001", supportedGenerationMethods: ["embedContent"] },
+  { id: "models/gemini-3.8-flash-tts", supportedGenerationMethods: ["generateContent"] },
+  { id: "models/imagen-4.0-fast-generate-001", supportedGenerationMethods: ["predict"] },
+  { id: "models/gemini-3-pro-image", supportedGenerationMethods: ["generateContent"] },
+  { id: "models/gemini-nano-banana-2.1", supportedGenerationMethods: ["generateContent"] },
+  { id: "models/gemini-3.1-flash-lite-image", supportedGenerationMethods: ["generateContent"] },
+  { id: "models/gemini-4-argon", supportedGenerationMethods: ["generateContent"] },
+  { id: "models/gemini-4-hydrogen", supportedGenerationMethods: ["generateContent"] },
+  { id: "models/gemini-2.5-flash", supportedGenerationMethods: ["generateContent"] },
+]);
+assert.equal(geminiDiscovered.textModels[0], "gemini-4-hydrogen");
+assert.equal(geminiDiscovered.textModels[1], "gemini-4-argon");
+assert.equal(geminiDiscovered.textModels.includes("gemini-embedding-001"), false);
+assert.equal(geminiDiscovered.textModels.includes("gemini-3.8-flash-tts"), false);
+assert.deepEqual(geminiDiscovered.imageModels, [
+  "gemini-nano-banana-2.1",
+  "gemini-3.1-flash-lite-image",
+  "gemini-3-pro-image",
+  "imagen-4.0-fast-generate-001",
+]);
+assert.equal(isImagenModel("imagen-4.0-fast-generate-001"), true);
+assert.equal(isImagenModel("gemini-nano-banana-2.1"), false);
+
+const openAiDiscovered = classifyAndRankModels("OpenAI", [
+  { id: "text-embedding-3-large" },
+  { id: "whisper-1" },
+  { id: "dall-e-2" },
+  { id: "dall-e-3" },
+  { id: "gpt-image-1" },
+  { id: "gpt-4.1-mini" },
+  { id: "gpt-4o" },
+]);
+assert.deepEqual(openAiDiscovered.imageModels, ["gpt-image-1", "dall-e-3", "dall-e-2"]);
+assert.equal(openAiDiscovered.textModels[0], "gpt-4.1-mini");
+assert.equal(openAiImageSizeForModel("dall-e-3", "16:9"), "1792x1024");
+assert.equal(openAiImageSizeForModel("dall-e-2", "9:16"), "1024x1024");
+assert.equal(openAiImageSizeForModel("gpt-image-1", "9:16"), "1024x1536");
+
+const chain = buildCandidateChain({
+  autoModel: true,
+  preferred: "nonexistent-old-model",
+  discovered: geminiDiscovered.imageModels,
+});
+assert.equal(chain[0], "gemini-nano-banana-2.1");
+assert.equal(chain.includes("nonexistent-old-model"), false);
+assert.equal(chain.length, 4);
+
+assert.equal(shouldSwitchModel(429, "RESOURCE_EXHAUSTED: Quota exceeded"), true);
+assert.equal(shouldSwitchModel(404, "models/x is not found"), true);
+assert.equal(shouldSwitchModel(503, "Service unavailable"), true);
+assert.equal(shouldSwitchModel(400, "Model does not support IMAGE responseModalities"), true);
+assert.equal(shouldSwitchModel(401, "API key not valid"), false);
+assert.equal(shouldSwitchModel(400, "API_KEY_INVALID"), false);
 
 console.log("nmcGen pipeline tests: all passed");

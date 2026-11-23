@@ -42,6 +42,10 @@ interface InspectorDrawerProps {
   onConnect: (sourceId: string, targetId: string) => void;
   onDeleteEdge: (edgeId: string) => void;
   onSyncBeatsToSegments: (scriptNodeId: string) => void;
+  onSyncDiscoveredModels: (
+    profileId: string,
+    discovered: { textModels: string[]; imageModels: string[]; fetchedAt: number },
+  ) => void;
   onOpenPipeline: () => void;
   onOpenSettings: () => void;
   onClose: () => void;
@@ -62,6 +66,7 @@ export default function InspectorDrawer({
   onConnect,
   onDeleteEdge,
   onSyncBeatsToSegments,
+  onSyncDiscoveredModels,
   onOpenPipeline,
   onOpenSettings,
   onClose,
@@ -108,6 +113,9 @@ export default function InspectorDrawer({
         system: "Kamu adalah sutradara drama pendek. Balas HANYA dengan JSON array valid.",
         prompt,
       });
+      if (res.discovered) {
+        onSyncDiscoveredModels(textProfile.id, res.discovered);
+      }
       if (!res.ok || !res.text) {
         setErrMsg(res.error || "Provider AI tidak mengembalikan teks. Cek API key di Pengaturan.");
         return;
@@ -130,7 +138,9 @@ export default function InspectorDrawer({
         dialogue: String(item.dialogue || ""),
       }));
       patchData<ScriptNodeData>({ beats });
-      setOkMsg(`${beats.length} beat berhasil disusun. Klik "Sinkronkan ke Node Segmen" untuk membuat node segmennya.`);
+      const modelNote = res.usedModel ? ` via ${res.usedModel}` : "";
+      const fbNote = res.fallbackNotes?.length ? ` (fallback dari: ${res.fallbackNotes.join(", ")})` : "";
+      setOkMsg(`${beats.length} beat berhasil disusun${modelNote}${fbNote}. Klik "Buat Segmen dari Beat" untuk menerapkannya.`);
     } catch (err) {
       setErrMsg(`Gagal memproses beat: ${(err as Error).message}`);
     } finally {
@@ -159,6 +169,9 @@ export default function InspectorDrawer({
         prompt: template,
         aspectRatio: "16:9",
       });
+      if (res.discovered) {
+        onSyncDiscoveredModels(imageProfile.id, res.discovered);
+      }
       if (!res.ok || !res.image) {
         setErrMsg(res.error || "Gagal membuat gambar aset. Periksa API key gambar di Pengaturan.");
         return;
@@ -167,7 +180,9 @@ export default function InspectorDrawer({
         imageDataUrl: res.image,
         imageName: `${d.tag.replace(/[^a-zA-Z0-9_-]/g, "") || "asset"}.png`,
       });
-      setOkMsg("Gambar referensi aset berhasil dibuat dan dikunci di node ini.");
+      const modelNote = res.usedModel ? ` via ${res.usedModel}` : "";
+      const fbNote = res.fallbackNotes?.length ? ` (otomatis beralih dari: ${res.fallbackNotes.join(", ")})` : "";
+      setOkMsg(`Gambar referensi aset berhasil dibuat${modelNote}${fbNote} dan dikunci di node ini.`);
     } catch (err) {
       setErrMsg(`Gagal membuat gambar aset: ${(err as Error).message}`);
     } finally {
@@ -192,6 +207,9 @@ export default function InspectorDrawer({
         aspectRatio: script?.aspectRatio ?? "16:9",
         referenceImages: refImages,
       });
+      if (res.discovered) {
+        onSyncDiscoveredModels(imageProfile.id, res.discovered);
+      }
       if (!res.ok || !res.image) {
         setErrMsg(res.error || "Gagal membuat frame segmen. Periksa API key di Pengaturan.");
         return;
@@ -203,14 +221,16 @@ export default function InspectorDrawer({
           {
             id: candId,
             kind: "image",
-            label: `Kandidat #${d.candidates.length + 1}`,
+            label: res.usedModel ? `#${d.candidates.length + 1} (${res.usedModel.slice(0, 18)})` : `Kandidat #${d.candidates.length + 1}`,
             dataUrl: res.image,
             createdAt: Date.now(),
           },
         ],
         adoptedId: d.adoptedId || candId,
       });
-      setOkMsg("Frame kandidat ditambahkan. Pilih mana yang ingin diadopsi di bawah.");
+      const modelNote = res.usedModel ? ` via ${res.usedModel}` : "";
+      const fbNote = res.fallbackNotes?.length ? ` (otomatis beralih dari: ${res.fallbackNotes.join(", ")})` : "";
+      setOkMsg(`Frame kandidat ditambahkan${modelNote}${fbNote}.`);
     } catch (err) {
       setErrMsg(`Gagal membuat frame: ${(err as Error).message}`);
     } finally {

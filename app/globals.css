@@ -1213,6 +1213,100 @@ video {
   width: min(540px, 100%);
 }
 
+/* Discovered AI Models & Advanced Toggle */
+.discoveredBox {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.discoveredGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.discoveredHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.modelChipList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.modelChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.modelChip[data-primary="true"] {
+  border-color: #7c5620;
+  background: var(--warn-bg);
+  color: var(--accent-text);
+}
+
+.modelChipRank {
+  color: var(--ink-muted);
+}
+
+.modelChip[data-primary="true"] .modelChipRank {
+  color: var(--accent-text);
+}
+
+.advancedDetails {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.advancedSummary {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  user-select: none;
+}
+
+.advancedSummary:hover {
+  color: var(--ink);
+}
+
+.advancedBody {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.checkRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.checkRow input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 /* Tablet breakpoint: wrap header cleanly & slide-over inspector drawer */
 @media (max-width: 1079px) {
   .dashboardMain {

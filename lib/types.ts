@@ -138,6 +138,10 @@ export interface ProviderProfile {
   textModel: string;
   imageModel: string;
   timeoutSecs: number;
+  autoModel?: boolean;
+  discoveredTextModels?: string[];
+  discoveredImageModels?: string[];
+  modelsSyncedAt?: number;
 }
 
 export interface NmcSettings {

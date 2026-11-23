@@ -775,6 +775,21 @@ export default function NmcStudio() {
             onConnect={handleConnect}
             onDeleteEdge={handleDeleteEdge}
             onSyncBeatsToSegments={handleSyncBeatsToSegments}
+            onSyncDiscoveredModels={(profileId, discovered) =>
+              updateSettings((prev) => ({
+                ...prev,
+                profiles: prev.profiles.map((p) =>
+                  p.id === profileId
+                    ? {
+                        ...p,
+                        discoveredTextModels: discovered.textModels,
+                        discoveredImageModels: discovered.imageModels,
+                        modelsSyncedAt: discovered.fetchedAt,
+                      }
+                    : p,
+                ),
+              }))
+            }
             onOpenPipeline={() => setPipelineOpen(true)}
             onOpenSettings={() => setSettingsOpen(true)}
             onClose={() => setSelectedNodeId(null)}
