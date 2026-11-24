@@ -12,6 +12,7 @@ export const uid = () =>
     ? crypto.randomUUID()
     : `id_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
+export const DEFAULT_CLOUDFLARE_ID = "default-cloudflare-ai";
 export const DEFAULT_GEMINI_ID = "default-gemini";
 export const DEFAULT_OPENAI_ID = "default-openai";
 export const DEFAULT_ANTHROPIC_ID = "default-anthropic";
@@ -92,6 +93,16 @@ export function matchVisualStylePreset(styleText: string): string {
 }
 
 export const defaultProfiles = (): ProviderProfile[] => [
+  {
+    id: DEFAULT_CLOUDFLARE_ID,
+    name: "Cloudflare Workers AI",
+    kind: "CloudflareAI",
+    baseUrl: "https://api.cloudflare.com/client/v4",
+    textModel: "",
+    imageModel: "",
+    timeoutSecs: 180,
+    autoModel: true,
+  },
   {
     id: DEFAULT_GEMINI_ID,
     name: "Gemini API",

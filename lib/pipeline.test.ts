@@ -24,9 +24,17 @@ import { buildZip } from "./zip.ts";
 import {
   buildCandidateChain,
   classifyAndRankModels,
+  CLOUDFLARE_FREE_IMAGE_MODELS,
+  CLOUDFLARE_FREE_TEXT_MODELS,
+  cloudflareImageDims,
+  detectBase64ImageMime,
   detectProviderKindFromKey,
+  extractWorkersAiText,
+  isCloudflareFluxSchnellModel,
+  isCloudflareMultipartImageModel,
   isImagenModel,
   openAiImageSizeForModel,
+  parseCloudflareRestCredentials,
   shouldSwitchModel,
 } from "./modelRouter.ts";
 import { mergeProjects, projectToSupabaseRow } from "./supabaseSync.ts";
@@ -237,5 +245,45 @@ assert.equal(
 );
 assert.equal(shouldSwitchModel(429, "RESOURCE_EXHAUSTED"), true);
 assert.equal(shouldSwitchModel(401, "API_KEY_INVALID"), false);
+
+// 11. Cloudflare Workers AI model routing, schema helpers, and response extraction
+const cfDiscovered = classifyAndRankModels("CloudflareAI", [
+  { id: "@cf/meta/llama-guard-3-8b" },
+  { id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast" },
+  { id: "@cf/google/gemma-4-26b-a4b-it" },
+  { id: "@cf/aisingapore/gemma-sea-lion-v4-27b-it" },
+  { id: "@cf/black-forest-labs/flux-1-schnell" },
+  { id: "@cf/black-forest-labs/flux-2-klein-4b" },
+  { id: "@cf/leonardo/phoenix-1.0" },
+]);
+assert.equal(cfDiscovered.textModels[0], CLOUDFLARE_FREE_TEXT_MODELS[0]);
+assert.equal(cfDiscovered.textModels.includes("@cf/meta/llama-guard-3-8b"), false);
+assert.deepEqual(cfDiscovered.imageModels, [
+  CLOUDFLARE_FREE_IMAGE_MODELS[0],
+  CLOUDFLARE_FREE_IMAGE_MODELS[1],
+  "@cf/leonardo/phoenix-1.0",
+]);
+assert.equal(isCloudflareMultipartImageModel("@cf/black-forest-labs/flux-2-klein-4b"), true);
+assert.equal(isCloudflareMultipartImageModel("@cf/black-forest-labs/flux-1-schnell"), false);
+assert.equal(isCloudflareFluxSchnellModel("@cf/black-forest-labs/flux-1-schnell"), true);
+assert.deepEqual(cloudflareImageDims("16:9"), { width: 1024, height: 576 });
+assert.deepEqual(cloudflareImageDims("9:16"), { width: 576, height: 1024 });
+assert.equal(detectBase64ImageMime("/9j/4AAQSkZJRg"), "image/jpeg");
+assert.equal(detectBase64ImageMime("iVBORw0KGgoAAA"), "image/png");
+assert.equal(extractWorkersAiText({ response: "Halo dunia" }), "Halo dunia");
+assert.equal(
+  extractWorkersAiText({
+    result: { choices: [{ message: { content: "<think>cek</think>Naskah jadi." } }] },
+  }),
+  "Naskah jadi.",
+);
+assert.deepEqual(
+  parseCloudflareRestCredentials(
+    "https://api.cloudflare.com/client/v4",
+    "0123456789abcdef0123456789abcdef:cf_token_test",
+  ),
+  { accountId: "0123456789abcdef0123456789abcdef", apiToken: "cf_token_test" },
+);
+assert.equal(shouldSwitchModel(403, "Model requires Workers Paid"), true);
 
 console.log("nmcGen pipeline tests: all passed");

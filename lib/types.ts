@@ -128,7 +128,7 @@ export interface NmcProject {
   edges: CanvasEdge[];
 }
 
-export type ProviderKind = "Gemini" | "OpenAI" | "Anthropic" | "OpenAICompatible";
+export type ProviderKind = "CloudflareAI" | "Gemini" | "OpenAI" | "Anthropic" | "OpenAICompatible";
 
 export interface ProviderProfile {
   id: string;
@@ -161,7 +161,9 @@ export interface RuntimeStatus {
   ffmpegVersion?: string;
   defaultCapCutDir?: string;
   supabaseConnected?: boolean;
+  workersAiBinding?: boolean;
   serverKeys: {
+    cloudflareAi?: boolean;
     gemini: boolean;
     geminiImage: boolean;
     openai: boolean;

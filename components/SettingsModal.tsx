@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from "react";
 import type { NmcSettings, ProviderProfile, RuntimeStatus } from "@/lib/types";
 import { detectProviderKindFromKey } from "@/lib/modelRouter";
+import { DEFAULT_CLOUDFLARE_ID } from "@/lib/presets";
 import { callAi, getKeyHint, setApiKey } from "@/lib/storage";
 import { CloseIcon } from "./Icons";
 
@@ -23,6 +24,9 @@ function profileModelBadge(p: ProviderProfile): string {
   }
   if (!auto && (p.textModel || p.imageModel)) {
     return [p.textModel, p.imageModel].filter(Boolean).join(" / ");
+  }
+  if (p.kind === "CloudflareAI") {
+    return "binding Worker, tanpa API key";
   }
   return "otomatis dari API key";
 }
@@ -160,6 +164,26 @@ export default function SettingsModal({
   const textModels = activeProfile.discoveredTextModels ?? [];
   const imageModels = activeProfile.discoveredImageModels ?? [];
   const isAuto = activeProfile.autoModel !== false;
+  const isCloudflare = activeProfile.kind === "CloudflareAI";
+  const cfBindingActive = Boolean(runtime?.workersAiBinding);
+  const cfProfile = settings.profiles.find((p) => p.id === DEFAULT_CLOUDFLARE_ID || p.kind === "CloudflareAI");
+  const usingCloudflareForBoth =
+    Boolean(cfProfile) &&
+    settings.textProfileId === cfProfile?.id &&
+    settings.imageProfileId === cfProfile?.id;
+
+  const handleActivateCloudflare = async () => {
+    if (!cfProfile) return;
+    setActiveId(cfProfile.id);
+    setKeyDraft("");
+    setAutoSwitchedHint("");
+    onUpdateSettings((prev) => ({
+      ...prev,
+      textProfileId: cfProfile.id,
+      imageProfileId: cfProfile.id,
+    }));
+    await runDiscover(cfProfile);
+  };
 
   return (
     <div
@@ -188,8 +212,11 @@ export default function SettingsModal({
             </div>
 
             <p style={{ margin: 0, fontSize: 12, color: "var(--ink-muted)" }}>
-              Masukkan API key lalu klik Simpan &amp; Deteksi. Sistem langsung mengenali seluruh model teks dan
-              gambar yang didukung akun Anda, lalu otomatis berpindah ke model gambar lain bila terkena limit.
+              {isCloudflare
+                ? cfBindingActive
+                  ? "Cloudflare Workers AI terhubung langsung melalui binding Worker. Teks dan gambar berjalan tanpa API key, dengan fallback otomatis antar model Workers AI."
+                  : "Cloudflare Workers AI memakai binding Worker saat berjalan di Cloudflare. Untuk mode lokal Node.js, isi ACCOUNT_ID:API_TOKEN di bawah atau jalankan via npm run dev:vinext."
+                : "Masukkan API key lalu klik Simpan & Deteksi. Sistem langsung mengenali seluruh model teks dan gambar yang didukung akun Anda, lalu otomatis berpindah ke model lain bila terkena limit."}
             </p>
 
             <div className="fieldRow">
@@ -216,20 +243,34 @@ export default function SettingsModal({
                 </select>
               </div>
 
-              <div className="fieldGroup">
-                <label className="fieldLabel" htmlFor="inp-api-key">
-                  API Key {savedHint ? `(tersimpan: ${savedHint})` : "(disimpan lokal di browser)"}
-                </label>
-                <input
-                  id="inp-api-key"
-                  type="password"
-                  className="input mono"
-                  value={keyDraft}
-                  onChange={(e) => handleKeyInputChange(e.target.value)}
-                  placeholder="Tempel API key Gemini, OpenAI, atau Anthropic..."
-                />
-              </div>
+              {!(isCloudflare && cfBindingActive) ? (
+                <div className="fieldGroup">
+                  <label className="fieldLabel" htmlFor="inp-api-key">
+                    {isCloudflare
+                      ? `Account ID & Token ${savedHint ? `(tersimpan: ${savedHint})` : "(opsional untuk lokal)"}`
+                      : `API Key ${savedHint ? `(tersimpan: ${savedHint})` : "(disimpan lokal di browser)"}`}
+                  </label>
+                  <input
+                    id="inp-api-key"
+                    type="password"
+                    className="input mono"
+                    value={keyDraft}
+                    onChange={(e) => handleKeyInputChange(e.target.value)}
+                    placeholder={
+                      isCloudflare
+                        ? "ACCOUNT_ID:API_TOKEN (kosongkan jika pakai Workers binding)"
+                        : "Tempel API key Gemini, OpenAI, atau Anthropic..."
+                    }
+                  />
+                </div>
+              ) : null}
             </div>
+
+            {isCloudflare && cfBindingActive ? (
+              <div className="alertBox" data-tone="ok">
+                Binding Cloudflare Workers AI aktif di server ini. Tidak perlu API key.
+              </div>
+            ) : null}
 
             {autoSwitchedHint ? (
               <p style={{ margin: 0, fontSize: 12, color: "var(--accent-text)" }}>{autoSwitchedHint}</p>
@@ -239,9 +280,11 @@ export default function SettingsModal({
               <button type="submit" className="btn btnPrimary btnSm" disabled={detecting}>
                 {detecting
                   ? "Mendeteksi model tersedia..."
-                  : keyDraft.trim()
-                    ? "Simpan & Deteksi Model"
-                    : "Segarkan Daftar Model"}
+                  : isCloudflare && cfBindingActive
+                    ? "Muat & Aktifkan Model Workers AI"
+                    : keyDraft.trim()
+                      ? "Simpan & Deteksi Model"
+                      : "Segarkan Daftar Model"}
               </button>
               {savedHint ? (
                 <button
@@ -378,7 +421,19 @@ export default function SettingsModal({
 
           {/* Active Provider Selectors */}
           <div className="sectionBox">
-            <h3>Provider Aktif di Kanvas</h3>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <h3>Provider Aktif di Kanvas</h3>
+              {cfBindingActive && cfProfile && !usingCloudflareForBoth ? (
+                <button
+                  type="button"
+                  className="btn btnPrimary btnSm"
+                  disabled={detecting}
+                  onClick={handleActivateCloudflare}
+                >
+                  Pakai Cloudflare Workers AI
+                </button>
+              ) : null}
+            </div>
             <div className="fieldRow">
               <div className="fieldGroup">
                 <label className="fieldLabel" htmlFor="sel-text-provider">
@@ -436,6 +491,17 @@ export default function SettingsModal({
             ) : (
               <>
                 <div className="nodeMetaRow">
+                  <span
+                    className="metaTag"
+                    data-tone={runtime.workersAiBinding || runtime.serverKeys.cloudflareAi ? "ok" : "warn"}
+                  >
+                    Workers AI:{" "}
+                    {runtime.workersAiBinding
+                      ? "Binding Aktif"
+                      : runtime.serverKeys.cloudflareAi
+                        ? "REST Siap"
+                        : "Belum Aktif"}
+                  </span>
                   <span className="metaTag" data-tone={runtime.supabaseConnected ? "ok" : "warn"}>
                     Supabase: {runtime.supabaseConnected ? "Terhubung" : "Mode Lokal"}
                   </span>

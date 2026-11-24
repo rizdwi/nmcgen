@@ -1,5 +1,5 @@
 "use client";
-import { DEFAULT_GEMINI_ID, defaultProfiles } from "./presets";
+import { DEFAULT_CLOUDFLARE_ID, defaultProfiles } from "./presets";
 import type { NmcProject, NmcSettings, ProviderProfile } from "./types";
 
 const DB_NAME = "nmcgen-db";
@@ -41,18 +41,20 @@ export const projectDb = {
 export function loadSettings(): NmcSettings {
   const fallback: NmcSettings = {
     profiles: defaultProfiles(),
-    textProfileId: DEFAULT_GEMINI_ID,
-    imageProfileId: DEFAULT_GEMINI_ID,
+    textProfileId: DEFAULT_CLOUDFLARE_ID,
+    imageProfileId: DEFAULT_CLOUDFLARE_ID,
     lastProjectId: "",
   };
   try {
     const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
     const merged: NmcSettings = { ...fallback, ...raw };
-    for (const def of defaultProfiles()) {
-      if (!merged.profiles.some((p) => p.id === def.id)) merged.profiles.push(def);
+    const existingIds = new Set(merged.profiles.map((p) => p.id));
+    const missing = defaultProfiles().filter((def) => !existingIds.has(def.id));
+    if (missing.length > 0) {
+      merged.profiles = [...missing, ...merged.profiles];
     }
-    if (!merged.textProfileId) merged.textProfileId = DEFAULT_GEMINI_ID;
-    if (!merged.imageProfileId) merged.imageProfileId = DEFAULT_GEMINI_ID;
+    if (!merged.textProfileId) merged.textProfileId = DEFAULT_CLOUDFLARE_ID;
+    if (!merged.imageProfileId) merged.imageProfileId = DEFAULT_CLOUDFLARE_ID;
     return merged;
   } catch {
     return fallback;

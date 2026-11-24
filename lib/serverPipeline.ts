@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { AssemblyNodeData, AudioNodeData, NmcProject, RuntimeStatus, SegmentNodeData } from "./types";
+import { getCloudflareAiBinding } from "./cfEnv";
 import { resolutionFor } from "./presets";
 import { getServerSupabaseConfig } from "./supabaseSync";
 import {
@@ -88,6 +89,8 @@ export async function detectRuntime(): Promise<RuntimeStatus> {
     localPyCapCut = mod.ok;
   }
 
+  const workersAiBinding = Boolean(await getCloudflareAiBinding());
+
   return {
     mode: !isServerless && ff.ok && Boolean(pyBin) ? "local-hybrid" : "web-serverless",
     isServerless,
@@ -98,7 +101,11 @@ export async function detectRuntime(): Promise<RuntimeStatus> {
     ffmpegVersion: ff.ok ? ff.stdout.split(/\r?\n/)[0]?.slice(0, 80) : undefined,
     defaultCapCutDir: isServerless ? undefined : defaultCapCutDraftsDir(),
     supabaseConnected: Boolean(getServerSupabaseConfig()),
+    workersAiBinding,
     serverKeys: {
+      cloudflareAi:
+        workersAiBinding ||
+        Boolean(process?.env?.CLOUDFLARE_ACCOUNT_ID && process?.env?.CLOUDFLARE_API_TOKEN),
       gemini: Boolean(process?.env?.GEMINI_API_KEY),
       geminiImage: Boolean(process?.env?.GEMINI_IMAGE_API_KEY || process?.env?.GEMINI_API_KEY),
       openai: Boolean(process?.env?.OPENAI_API_KEY),

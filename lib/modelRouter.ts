@@ -14,10 +14,29 @@ export interface DiscoveredModels {
 }
 
 const EXCLUDED_MODEL_RE =
-  /(embed|embedding|aqa|tts|transcribe|whisper|lyria|veo|omni|genie|decision|moderation|realtime|audio|rerank|babbage|davinci|robotics|computer-use|deep-research|learnlm|text-moderation|text-search|code-search)/i;
+  /(embed|embedding|aqa|tts|transcribe|whisper|lyria|veo|omni|genie|decision|moderation|realtime|audio|rerank|babbage|davinci|robotics|computer-use|deep-research|learnlm|text-moderation|text-search|code-search|llama-guard|phonellm)/i;
 
 const GEMINI_IMAGE_RE = /(nano-banana|imagen|-image\b|image-generation|image-preview|image-lite)/i;
 const OPENAI_IMAGE_RE = /(gpt-image|dall-e|flux|sdxl|stable-diffusion|ideogram|recraft|imagen|[-/]image\b|^image-)/i;
+const CLOUDFLARE_IMAGE_RE = /(flux-|leonardo\/|stable-diffusion|dreamshaper|sdxl)/i;
+
+export const CLOUDFLARE_FREE_TEXT_MODELS = [
+  "@cf/google/gemma-4-26b-a4b-it",
+  "@cf/aisingapore/gemma-sea-lion-v4-27b-it",
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/meta/llama-4-scout-17b-16e-instruct",
+  "@cf/qwen/qwen3.8-27b",
+  "@cf/zai-org/glm-4.7-flash",
+  "@cf/mistralai/mistral-small-3.1-24b-instruct",
+];
+
+export const CLOUDFLARE_FREE_IMAGE_MODELS = [
+  "@cf/black-forest-labs/flux-2-klein-4b",
+  "@cf/black-forest-labs/flux-1-schnell",
+  "@cf/black-forest-labs/flux-2-klein-9b",
+  "@cf/leonardo/phoenix-1.0",
+  "@cf/leonardo/lucid-origin",
+];
 
 export function normalizeModelId(id: string): string {
   return id.trim().replace(/^models\//i, "");
@@ -25,6 +44,83 @@ export function normalizeModelId(id: string): string {
 
 export function isImagenModel(modelId: string): boolean {
   return /^imagen[-_]/i.test(normalizeModelId(modelId));
+}
+
+export function isCloudflareMultipartImageModel(modelId: string): boolean {
+  return /flux-2-/i.test(normalizeModelId(modelId));
+}
+
+export function isCloudflareFluxSchnellModel(modelId: string): boolean {
+  return /flux-1-schnell/i.test(normalizeModelId(modelId));
+}
+
+export function cloudflareImageDims(aspectRatio: "9:16" | "16:9"): { width: number; height: number } {
+  return aspectRatio === "9:16" ? { width: 576, height: 1024 } : { width: 1024, height: 576 };
+}
+
+export function detectBase64ImageMime(base64: string): string {
+  const head = base64.slice(0, 12);
+  if (head.startsWith("iVBOR")) return "image/png";
+  if (head.startsWith("UklGR")) return "image/webp";
+  if (head.startsWith("/9j/")) return "image/jpeg";
+  return "image/png";
+}
+
+export function extractWorkersAiText(payload: unknown): string {
+  const root =
+    payload && typeof payload === "object" && "result" in payload && (payload as { result?: unknown }).result
+      ? (payload as { result: unknown }).result
+      : payload;
+
+  let text = "";
+  if (typeof root === "string") {
+    text = root;
+  } else if (root && typeof root === "object") {
+    const obj = root as {
+      response?: unknown;
+      choices?: Array<{ message?: { content?: unknown } }>;
+    };
+    if (typeof obj.response === "string") {
+      text = obj.response;
+    } else if (Array.isArray(obj.choices)) {
+      const content = obj.choices[0]?.message?.content;
+      if (typeof content === "string") {
+        text = content;
+      } else if (Array.isArray(content)) {
+        text = content
+          .map((part) => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : ""))
+          .join("");
+      }
+    }
+  }
+
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
+export function parseCloudflareRestCredentials(
+  baseUrl: string,
+  rawKey?: string,
+  env?: Record<string, string | undefined>,
+): { accountId: string; apiToken: string } | null {
+  const trimmedKey = (rawKey ?? "").trim();
+  let accountId = "";
+  let apiToken = "";
+
+  const pairMatch = trimmedKey.match(/^([0-9a-f]{32})\s*[:|/]\s*(\S+)$/i);
+  if (pairMatch) {
+    accountId = pairMatch[1];
+    apiToken = pairMatch[2];
+  } else {
+    apiToken = trimmedKey;
+    const urlMatch = baseUrl.match(/\/accounts\/([0-9a-f]{32})/i);
+    if (urlMatch) accountId = urlMatch[1];
+  }
+
+  accountId = accountId || (env?.CLOUDFLARE_ACCOUNT_ID ?? "").trim();
+  apiToken = apiToken || (env?.CLOUDFLARE_API_TOKEN ?? "").trim();
+
+  if (!accountId || !apiToken) return null;
+  return { accountId, apiToken };
 }
 
 export function detectProviderKindFromKey(rawKey: string): ProviderKind | null {
@@ -110,6 +206,32 @@ function scoreAnthropicText(id: string): number {
   return 700 + versionTuple(low);
 }
 
+function scoreCloudflareText(id: string): number {
+  const low = id.toLowerCase();
+  const preferredIdx = CLOUDFLARE_FREE_TEXT_MODELS.findIndex((m) => m.toLowerCase() === low);
+  if (preferredIdx !== -1) return 1000 - preferredIdx * 20;
+  if (low.includes("gemma-4")) return 840;
+  if (low.includes("sea-lion")) return 820;
+  if (low.includes("llama-3.3-70b")) return 800;
+  if (low.includes("llama-4")) return 780;
+  if (low.includes("qwen3")) return 760;
+  if (low.includes("glm-4")) return 740;
+  if (low.includes("mistral-small")) return 720;
+  return 500 + versionTuple(low);
+}
+
+function scoreCloudflareImage(id: string): number {
+  const low = id.toLowerCase();
+  const preferredIdx = CLOUDFLARE_FREE_IMAGE_MODELS.findIndex((m) => m.toLowerCase() === low);
+  if (preferredIdx !== -1) return 1000 - preferredIdx * 20;
+  if (low.includes("flux-2")) return 880;
+  if (low.includes("flux-1")) return 860;
+  if (low.includes("phoenix")) return 820;
+  if (low.includes("lucid-origin")) return 800;
+  if (low.includes("stable-diffusion")) return 740;
+  return 600 + versionTuple(low);
+}
+
 export function classifyAndRankModels(
   kind: ProviderKind,
   rawModels: RawProviderModel[],
@@ -144,6 +266,15 @@ export function classifyAndRankModels(
       continue;
     }
 
+    if (kind === "CloudflareAI") {
+      if (CLOUDFLARE_IMAGE_RE.test(id)) {
+        imageSet.add(id);
+      } else if (/^@(?:cf|hf)\//i.test(id)) {
+        textSet.add(id);
+      }
+      continue;
+    }
+
     if (kind === "Anthropic") {
       if (/^claude/i.test(id) || id.length > 0) {
         textSet.add(id);
@@ -166,12 +297,14 @@ export function classifyAndRankModels(
   }
 
   const textModels = [...textSet].sort((a, b) => {
+    if (kind === "CloudflareAI") return scoreCloudflareText(b) - scoreCloudflareText(a) || a.localeCompare(b);
     if (kind === "Gemini") return scoreGeminiText(b) - scoreGeminiText(a) || a.localeCompare(b);
     if (kind === "Anthropic") return scoreAnthropicText(b) - scoreAnthropicText(a) || a.localeCompare(b);
     return scoreOpenAiText(b) - scoreOpenAiText(a) || a.localeCompare(b);
   });
 
   const imageModels = [...imageSet].sort((a, b) => {
+    if (kind === "CloudflareAI") return scoreCloudflareImage(b) - scoreCloudflareImage(a) || a.localeCompare(b);
     if (kind === "Gemini") return scoreGeminiImage(b) - scoreGeminiImage(a) || a.localeCompare(b);
     return scoreOpenAiImage(b) - scoreOpenAiImage(a) || a.localeCompare(b);
   });
@@ -236,11 +369,11 @@ export function shouldSwitchModel(status: number, message: string): boolean {
     return true;
   }
   if (status === 400) {
-    return /(not supported|modality|response.?modalit|unknown model|invalid model|model.*not found|does not support|deprecated|not available|aspect.?ratio|size.*not supported)/i.test(
+    return /(not supported|modality|response.?modalit|unknown model|invalid model|model.*not found|does not support|deprecated|not available|aspect.?ratio|size.*not supported|invalid input|multipart|schema)/i.test(
       message,
     );
   }
-  return /(quota|rate.?limit|resource.?exhausted|limit exceeded|too many requests|overloaded|capacity|unavailable|model.*not found)/i.test(
+  return /(quota|rate.?limit|resource.?exhausted|limit exceeded|too many requests|overloaded|capacity|unavailable|model.*not found|neurons|workers paid|daily free allocation|partner|terms)/i.test(
     message,
   );
 }

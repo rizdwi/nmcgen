@@ -65,7 +65,7 @@ export default function NmcStudio() {
         localFfprobe: false,
         localPython: false,
         localPyCapCut: false,
-        serverKeys: { gemini: false, geminiImage: false, openai: false },
+        serverKeys: { cloudflareAi: false, gemini: false, geminiImage: false, openai: false },
       });
     }
   }, []);
@@ -622,14 +622,16 @@ export default function NmcStudio() {
 
           <span
             className="runtimePill"
-            data-ready={runtime?.mode === "local-hybrid"}
-            title="Status mesin render FFmpeg & Python saat ini"
+            data-ready={runtime?.mode === "local-hybrid" || Boolean(runtime?.workersAiBinding)}
+            title="Status runtime server dan Cloudflare Workers AI"
           >
             {runtime === null
               ? "Mengecek runtime..."
               : runtime.mode === "local-hybrid"
                 ? "Lokal: FFmpeg Siap"
-                : "Mode Web Hybrid"}
+                : runtime.workersAiBinding
+                  ? "Cloudflare Workers AI"
+                  : "Mode Web Hybrid"}
           </span>
         </nav>
 
