@@ -237,6 +237,7 @@ export function createDefaultNode(kind: NodeKind, x: number, y: number, index = 
           scriptText: "",
           aspectRatio: "16:9",
           maxSegmentSec: 8,
+          targetSegments: 5,
           visualStyle: DEFAULT_VISUAL_STYLE,
           beats: [],
         },

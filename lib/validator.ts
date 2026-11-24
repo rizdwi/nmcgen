@@ -143,8 +143,9 @@ export function composeSegmentPrompt(project: NmcProject, segmentNode: CanvasNod
 
   const lines: string[] = [];
   if (script?.visualStyle) lines.push(`Visual style: ${script.visualStyle}.`);
+  const stageTag = seg.storyStage ? ` [${seg.storyStage}]` : "";
   lines.push(
-    `Segment ${seg.code} (${seg.durationSec}s, ${script?.aspectRatio ?? "16:9"}), framing ${seg.shotSize}, angle ${seg.cameraAngle}, camera ${seg.cameraMotion}.`,
+    `Segment ${seg.code}${stageTag} (${seg.durationSec}s, ${script?.aspectRatio ?? "16:9"}), framing ${seg.shotSize}, angle ${seg.cameraAngle}, camera ${seg.cameraMotion}.`,
   );
   if (boundAssets.length) {
     lines.push("Reference assets:");
@@ -158,6 +159,66 @@ export function composeSegmentPrompt(project: NmcProject, segmentNode: CanvasNod
   if (seg.dialogue.trim()) lines.push(`Spoken dialogue (preserve verbatim): "${seg.dialogue.trim()}"`);
   lines.push("No baked subtitles, no watermark, no random screen text.");
   return lines.join("\n");
+}
+
+// Pure visual prompt for still-image models: excludes dialogue quotes and timecodes to avoid text artifacts.
+export function composeSegmentImagePrompt(project: NmcProject, segmentNode: CanvasNode): string {
+  if (segmentNode.data.kind !== "segment") return "";
+  const seg = segmentNode.data;
+  const script = getPrimaryScript(project);
+  const boundAssets = getBoundAssets(project, segmentNode.id);
+
+  const actionText = (seg.visualPrompt?.trim() || seg.timelineText)
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\[[^\]]+\]\s*/, "").trim())
+    .filter(Boolean)
+    .join(" ");
+
+  const parts: string[] = [
+    `Single full-bleed cinematic film frame, ${FLOW_SHOT_LABELS[seg.shotSize]}, ${FLOW_ANGLE_LABELS[seg.cameraAngle]}.`,
+  ];
+  if (script?.visualStyle) parts.push(`Visual style: ${script.visualStyle}.`);
+  if (actionText) parts.push(`Scene action and composition: ${actionText}.`);
+  if (boundAssets.length > 0) {
+    const desc = boundAssets
+      .map((a) => {
+        const d = a.data as AssetNodeData;
+        return `${d.tag} (${d.category}): ${d.lockPrompt || a.title}`;
+      })
+      .join("; ");
+    parts.push(`Character and world appearance: ${desc}.`);
+    parts.push(
+      "Use any attached reference images strictly for subject appearance consistency. Compose a brand-new camera angle and scene framing matching the shot description, never a turnaround sheet or split panel.",
+    );
+  }
+  if (seg.continuityLock.trim()) parts.push(`Lighting and continuity: ${seg.continuityLock.trim()}.`);
+  parts.push("Clean photographic film still, no text, no subtitles, no speech bubbles, no collage, no watermark.");
+  return parts.join(" ");
+}
+
+// Select reference images for a segment frame without letting a wide location sheet override close-up framing.
+export function selectSegmentReferenceImages(project: NmcProject, segmentNode: CanvasNode): string[] {
+  if (segmentNode.data.kind !== "segment") return [];
+  const seg = segmentNode.data;
+  const boundAssets = getBoundAssets(project, segmentNode.id);
+  const isTightShot = seg.shotSize === "CU" || seg.shotSize === "ECU" || seg.shotSize === "MCU";
+
+  const prioritized = [...boundAssets].sort((a, b) => {
+    const catA = (a.data as AssetNodeData).category;
+    const catB = (b.data as AssetNodeData).category;
+    const rank = (c: AssetNodeData["category"]) => (c === "character" ? 0 : c === "prop" ? 1 : 2);
+    return rank(catA) - rank(catB);
+  });
+
+  return prioritized
+    .filter((a) => {
+      const d = a.data as AssetNodeData;
+      if (!d.imageDataUrl) return false;
+      if (isTightShot && d.category === "location") return false;
+      return true;
+    })
+    .slice(0, 3)
+    .map((a) => (a.data as AssetNodeData).imageDataUrl as string);
 }
 
 const FLOW_SHOT_LABELS: Record<SegmentNodeData["shotSize"], string> = {

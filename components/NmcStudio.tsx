@@ -25,6 +25,7 @@ import InspectorDrawer from "./InspectorDrawer";
 import PipelineModal from "./PipelineModal";
 import ProjectDashboard, { type ProjectMetaDraft } from "./ProjectDashboard";
 import SettingsModal from "./SettingsModal";
+import ToonflowModal from "./ToonflowModal";
 import { CheckIcon, DashboardIcon, NodeKindIcon, PlusIcon, SlidersIcon } from "./Icons";
 
 const STAGE_ORDER: NodeKind[] = ["script", "asset", "segment", "audio", "assembly", "export"];
@@ -40,6 +41,7 @@ export default function NmcStudio() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"canvas" | "list">("canvas");
+  const [toonflowOpen, setToonflowOpen] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
@@ -198,6 +200,7 @@ export default function NmcStudio() {
 
   const handleBackToDashboard = () => {
     flushPendingSave();
+    setToonflowOpen(false);
     setPipelineOpen(false);
     setSelectedEdgeId(null);
     setProjects((prev) => [...prev].sort((a, b) => b.updatedAt - a.updatedAt));
@@ -401,22 +404,27 @@ export default function NmcStudio() {
         if (!sd.beats.length) return prev;
 
         const maxDur = Math.max(4, sd.maxSegmentSec || 15);
+        const hasStructuredStages = sd.beats.some((b) => Boolean(b.stage?.trim()));
         const groups: typeof sd.beats[] = [];
-        let cur: typeof sd.beats = [];
-        let curDur = 0;
 
-        for (const beat of sd.beats) {
-          const bDur = Math.max(1, beat.durationSec || 4);
-          if (cur.length > 0 && curDur + bDur > maxDur) {
-            groups.push(cur);
-            cur = [beat];
-            curDur = bDur;
-          } else {
-            cur.push(beat);
-            curDur += bDur;
+        if (hasStructuredStages) {
+          for (const beat of sd.beats) groups.push([beat]);
+        } else {
+          let cur: typeof sd.beats = [];
+          let curDur = 0;
+          for (const beat of sd.beats) {
+            const bDur = Math.max(1, beat.durationSec || 4);
+            if (cur.length > 0 && curDur + bDur > maxDur) {
+              groups.push(cur);
+              cur = [beat];
+              curDur = bDur;
+            } else {
+              cur.push(beat);
+              curDur += bDur;
+            }
           }
+          if (cur.length) groups.push(cur);
         }
-        if (cur.length) groups.push(cur);
 
         const existingCount = prev.nodes.filter((n) => n.kind === "segment").length;
         const assets = prev.nodes.filter((n) => n.kind === "asset");
@@ -429,9 +437,21 @@ export default function NmcStudio() {
           addedNodes.push(asmNode);
         }
 
+        const defaultShots: SegmentNodeData["shotSize"][] = ["WS", "MS", "MCU", "CU", "WS"];
+        const defaultAngles: SegmentNodeData["cameraAngle"][] = ["Front", "Side 90", "Low", "Rear 3/4", "High"];
+        const defaultMotions: SegmentNodeData["cameraMotion"][] = [
+          "Push-In",
+          "Pan Right",
+          "Push-In",
+          "Pull-Out",
+          "Pull-Out",
+        ];
+
         groups.forEach((grp, idx) => {
           const segNum = existingCount + idx + 1;
           const totalSec = grp.reduce((s, b) => s + (b.durationSec || 4), 0);
+          const primary = grp[0];
+          const stage = primary?.stage?.trim() || "";
           let cursor = 0;
           const tlLines = grp.map((b) => {
             const start = cursor;
@@ -439,20 +459,43 @@ export default function NmcStudio() {
             return `[0:${String(start).padStart(2, "0")}-0:${String(cursor).padStart(2, "0")}] ${b.summary}`;
           });
           const dialogue = grp.map((b) => b.dialogue.trim()).filter(Boolean).join(" ");
+          const continuityLock = grp
+            .map((b) => (b.continuityLock || "").trim())
+            .filter(Boolean)
+            .join("; ");
+          const visualPrompt = grp
+            .map((b) => (b.visualPrompt || "").trim())
+            .filter(Boolean)
+            .join(" ");
+
+          const code = `G${String(segNum).padStart(2, "0")}`;
           const node = createDefaultNode("segment", 750, 48 + (segNum - 1) * 250, segNum);
-          node.title = `Segmen G${String(segNum).padStart(2, "0")}`;
+          node.title = stage ? `${code}: ${stage}` : `Segmen ${code}`;
           node.data = {
             ...(node.data as SegmentNodeData),
-            code: `G${String(segNum).padStart(2, "0")}`,
+            code,
+            storyStage: stage || undefined,
             durationSec: Math.min(maxDur, totalSec),
-            shotSize: idx % 2 === 0 ? "MS" : "CU",
-            cameraAngle: idx % 2 === 0 ? "Front" : "Side 90",
-            cameraMotion: idx % 2 === 0 ? "Push-In" : "Pull-Out",
+            shotSize: primary?.shotSize ?? defaultShots[idx % defaultShots.length],
+            cameraAngle: primary?.cameraAngle ?? defaultAngles[idx % defaultAngles.length],
+            cameraMotion: primary?.cameraMotion ?? defaultMotions[idx % defaultMotions.length],
             timelineText: tlLines.join("\n"),
             dialogue,
+            continuityLock,
+            visualPrompt: visualPrompt || undefined,
           };
           addedNodes.push(node);
-          for (const asset of assets) {
+
+          // Wire only assets referenced by @tag or name in this beat; fall back to all assets if none matched.
+          const beatCorpus = `${tlLines.join(" ")} ${dialogue} ${continuityLock} ${visualPrompt}`.toLowerCase();
+          const matchedAssets = assets.filter((a) => {
+            if (a.data.kind !== "asset") return false;
+            const tag = a.data.tag.toLowerCase();
+            const cleanTag = tag.replace(/^@/, "");
+            return (tag && beatCorpus.includes(tag)) || (cleanTag.length >= 3 && beatCorpus.includes(cleanTag));
+          });
+          const wireAssets = matchedAssets.length > 0 ? matchedAssets : assets;
+          for (const asset of wireAssets) {
             addedEdges.push({ id: uid(), source: asset.id, target: node.id });
           }
           addedEdges.push({ id: uid(), source: node.id, target: asmNode!.id });
@@ -648,6 +691,14 @@ export default function NmcStudio() {
           <button
             type="button"
             className="btn btnSm"
+            onClick={() => setToonflowOpen(true)}
+            title="Buka seluruh pipeline 7 tahap Toonflow"
+          >
+            <span>Toonflow</span>
+          </button>
+          <button
+            type="button"
+            className="btn btnSm"
             onClick={() => setSettingsOpen(true)}
             aria-label="Pengaturan AI dan Runtime"
           >
@@ -809,12 +860,39 @@ export default function NmcStudio() {
                 ),
               }))
             }
+            onOpenToonflow={() => setToonflowOpen(true)}
             onOpenPipeline={() => setPipelineOpen(true)}
             onOpenSettings={() => setSettingsOpen(true)}
             onClose={() => setSelectedNodeId(null)}
           />
         ) : null}
       </main>
+
+      <ToonflowModal
+        open={toonflowOpen}
+        project={project}
+        textProfile={textProfile}
+        imageProfile={imageProfile}
+        onReplaceProject={(next) => commitProject(() => next)}
+        onSyncDiscoveredModels={(profileId, discovered) =>
+          updateSettings((prev) => ({
+            ...prev,
+            profiles: prev.profiles.map((p) =>
+              p.id === profileId
+                ? {
+                    ...p,
+                    discoveredTextModels: discovered.textModels,
+                    discoveredImageModels: discovered.imageModels,
+                    modelsSyncedAt: discovered.fetchedAt,
+                  }
+                : p,
+            ),
+          }))
+        }
+        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenPipeline={() => setPipelineOpen(true)}
+        onClose={() => setToonflowOpen(false)}
+      />
 
       <PipelineModal
         open={pipelineOpen}

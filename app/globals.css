@@ -907,6 +907,109 @@ video {
   overflow: hidden;
 }
 
+.modalDialogWide {
+  width: min(980px, 100%);
+}
+
+.toonflowTabs {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 4px;
+  padding: 8px 14px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.toonflowTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.toonflowTab:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.toonflowTab[aria-selected="true"] {
+  background: var(--surface-2);
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.toonflowTab[data-ready="true"] .toonflowTabCount {
+  color: var(--ok);
+}
+
+.toonflowTabCount {
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.toonflowCard {
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toonflowGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.toonflowEmptyThumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 4px;
+  border: 1px dashed var(--border);
+  background: var(--surface);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.toonflowTaskRow {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.toonflowTaskRow[data-status="done"] {
+  border-color: #2f6c4f;
+}
+
+.toonflowTaskRow[data-status="running"] {
+  border-color: var(--accent);
+}
+
+.toonflowTaskRow[data-status="error"] {
+  border-color: #7d3635;
+}
+
 .modalHeader {
   display: flex;
   align-items: center;

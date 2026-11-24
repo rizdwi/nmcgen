@@ -12,10 +12,12 @@ import {
   buildAss,
   buildSrt,
   composeGoogleFlowPrompt,
+  composeSegmentImagePrompt,
   composeSegmentPrompt,
   estimateDialogueSeconds,
   getPrimaryScript,
   getProjectCover,
+  selectSegmentReferenceImages,
   updateProjectMeta,
   validateProject,
 } from "./validator.ts";
@@ -38,6 +40,20 @@ import {
   shouldSwitchModel,
 } from "./modelRouter.ts";
 import { mergeProjects, projectToSupabaseRow } from "./supabaseSync.ts";
+import {
+  applyExtractedAssetsToProject,
+  cleanSourceText,
+  formatScenesToScreenplay,
+  parseConversationalEditResponse,
+  parseEventGraphResponse,
+  parseExtractedAssets,
+  parseScriptAgentResponse,
+  parseStoryboardBeats,
+  parseSupervisionResponse,
+  rebuildSegmentsFromBeats,
+  splitIntoChapters,
+  storyArcStages,
+} from "./toonflow.ts";
 import type { NmcProject, SegmentNodeData } from "./types.ts";
 
 // Synthetic test fixture built in test code only (no hardcoded sample in app source)
@@ -166,6 +182,34 @@ const prompt = composeSegmentPrompt(fixture, seg1);
 assert.ok(prompt.includes("@TokohA"));
 assert.ok(prompt.includes("@Stasiun"));
 
+const imgPrompt = composeSegmentImagePrompt(fixture, seg1);
+assert.ok(imgPrompt.includes("Single full-bleed cinematic film frame"));
+assert.equal(imgPrompt.includes("Keretanya sebentar lagi tiba."), false, "Still image prompt must not leak spoken dialogue");
+assert.equal(imgPrompt.includes("[0:00-0:07]"), false, "Still image prompt must not leak timecodes");
+
+// Close-up segment should prioritize character refs and skip wide location ref image (without mutating shared fixture)
+const cuProject: NmcProject = {
+  ...fixture,
+  nodes: fixture.nodes.map((n) => {
+    if (n.id === seg1.id && n.data.kind === "segment") {
+      return { ...n, data: { ...n.data, shotSize: "CU" as const } };
+    }
+    if (n.kind === "asset" && n.data.kind === "asset") {
+      return {
+        ...n,
+        data: {
+          ...n.data,
+          imageDataUrl: n.data.category === "character" ? "data:image/png;base64,CHAR" : "data:image/png;base64,LOC",
+        },
+      };
+    }
+    return n;
+  }),
+};
+const cuSeg = cuProject.nodes.find((n) => n.id === seg1.id)!;
+const cuRefs = selectSegmentReferenceImages(cuProject, cuSeg);
+assert.deepEqual(cuRefs, ["data:image/png;base64,CHAR"]);
+
 const flowPrompt = composeGoogleFlowPrompt(fixture, seg1);
 assert.ok(flowPrompt.includes("[Google Flow | G01"));
 assert.ok(flowPrompt.includes("Ingredients-to-Video"));
@@ -285,5 +329,75 @@ assert.deepEqual(
   { accountId: "0123456789abcdef0123456789abcdef", apiToken: "cf_token_test" },
 );
 assert.equal(shouldSwitchModel(403, "Model requires Workers Paid"), true);
+
+// 12. Full Toonflow pipeline (ingestion -> event graph -> assets -> script -> storyboard -> conversational edit -> supervision)
+assert.equal(storyArcStages(5).length, 5);
+assert.equal(cleanSourceText("Bab 1\r\nHalaman 1\r\nHalo   dunia\n\n\n\nBaru"), "Bab 1\nHalo dunia\n\nBaru");
+const chaps = splitIntoChapters("Bab 1: Awal\nRaka mencari adiknya.\n\nBab 2: Gudang\nMonster terbangun.");
+assert.equal(chaps.length, 2);
+assert.equal(chaps[0].title, "Bab 1: Awal");
+
+const parsedEvents = parseEventGraphResponse(
+  JSON.stringify([
+    { code: "EV01", stage: "Intro / Perkenalan", title: "Syal di Gerbang", summary: "@Raka menemukan syal kuning.", cause: "Adik hilang", effect: "Masuk gudang", conflict: "Gerbang terkunci", emotion: "cemas", location: "Gerbang Kota Tua", characters: ["@Raka"], durationSec: 8 },
+    { code: "EV02", stage: "Masalah 1 (Pemicu)", title: "Monster Bangkit", summary: "@Raka menemukan @Nadia lalu @Monster bangun.", cause: "Masuk gudang", effect: "Terjebak", conflict: "Monster menyerang", emotion: "panik", location: "Lorong Gudang", characters: ["@Raka", "@Nadia", "@Monster"], durationSec: 8 },
+  ]),
+  2,
+  8,
+);
+assert.equal(parsedEvents.length, 2);
+assert.deepEqual(parsedEvents[0].characters, ["@Raka"]);
+
+const extractedAssets = parseExtractedAssets(
+  JSON.stringify([
+    { tag: "@Raka", title: "Raka", category: "character", lockPrompt: "Indonesian man 26yo olive jacket DSLR camera" },
+    { tag: "@Monster", title: "Monster Gudang", category: "character", lockPrompt: "3m stone and black smoke monster amber eyes" },
+  ]),
+);
+const tfStarter = createStarterProject("Tes Toonflow", { aspectRatio: "16:9", maxSegmentSec: 8 });
+const withAssets = applyExtractedAssetsToProject(tfStarter, extractedAssets);
+assert.equal(withAssets.addedCount, 2);
+
+const parsedScenes = parseScriptAgentResponse(
+  JSON.stringify([
+    { code: "SC01", stage: "Intro / Perkenalan", heading: "EXT. GERBANG - MALAM", action: "@Raka memungut syal.", dialogue: "Nadia, kamu di dalam?", emotion: "cemas" },
+    { code: "SC02", stage: "Masalah 1 (Pemicu)", heading: "INT. GUDANG - MALAM", action: "@Monster keluar dari tembok.", dialogue: "Jangan mendekat!", emotion: "panik" },
+  ]),
+  parsedEvents,
+);
+assert.ok(formatScenesToScreenplay(parsedScenes).includes("BABAK 1 [Intro / Perkenalan]"));
+
+const sbBeats = parseStoryboardBeats(
+  JSON.stringify([
+    { code: "E01", stage: "Intro / Perkenalan", durationSec: 8, summary: "@Raka memungut syal di gerbang.", dialogue: "Nadia, kamu di dalam?", continuityLock: "Syal di tangan kiri", shotSize: "WS", cameraAngle: "Front", cameraMotion: "Push-In", visualPrompt: "Wide rainy street shot of Raka picking up a yellow scarf" },
+    { code: "E02", stage: "Masalah 1 (Pemicu)", durationSec: 8, summary: "@Raka menghadapi @Monster di gudang.", dialogue: "Jangan mendekat!", continuityLock: "Dalam gudang gelap", shotSize: "WS", cameraAngle: "Front", cameraMotion: "Pan Right", visualPrompt: "Inside dark warehouse, stone monster rising behind wooden crates" },
+  ]),
+  parsedEvents,
+  parsedScenes,
+  8,
+);
+// Adjacent duplicate shotSize + cameraAngle must be automatically broken
+assert.notEqual(sbBeats[0].cameraAngle, sbBeats[1].cameraAngle);
+
+const rebuiltTf = rebuildSegmentsFromBeats(withAssets.project, sbBeats, { replaceExisting: true });
+const rebuiltSegs = rebuiltTf.nodes.filter((n) => n.kind === "segment");
+assert.equal(rebuiltSegs.length, 2);
+// Selective asset wiring: G01 only mentions @Raka, so @Monster must NOT be wired into G01
+const g01Incoming = rebuiltTf.edges.filter((e) => e.target === rebuiltSegs[0].id).map((e) => e.source);
+const monsterAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Monster")!;
+assert.equal(g01Incoming.includes(monsterAsset.id), false, "Monster asset must not be wired into Intro beat before it appears");
+
+const convPatch = parseConversationalEditResponse(
+  JSON.stringify({ shotSize: "CU", cameraAngle: "Low", cameraMotion: "Static", timelineSummary: "Wajah Raka tegang.", visualPrompt: "Close-up low angle of Raka sweating in rain" }),
+  rebuiltSegs[0].data as SegmentNodeData,
+);
+assert.equal(convPatch.shotSize, "CU");
+assert.equal(convPatch.cameraAngle, "Low");
+
+const supReport = parseSupervisionResponse(
+  JSON.stringify({ score: 88, verdict: "siap", summary: "Alur cerita utuh dan jelas.", strengths: ["Sebab-akibat kuat"], issues: [] }),
+);
+assert.equal(supReport.verdict, "siap");
+assert.equal(supReport.score, 88);
 
 console.log("nmcGen pipeline tests: all passed");

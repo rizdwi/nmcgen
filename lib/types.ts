@@ -12,9 +12,15 @@ export type PlatformPreset = "tiktok" | "reels" | "youtube" | "google-flow" | "c
 export interface ScriptBeat {
   id: string;
   code: string;
+  stage?: string;
   durationSec: number;
   summary: string;
   dialogue: string;
+  continuityLock?: string;
+  shotSize?: ShotSize;
+  cameraAngle?: CameraAngle;
+  cameraMotion?: CameraMotion;
+  visualPrompt?: string;
 }
 
 export interface MediaCandidate {
@@ -25,14 +31,74 @@ export interface MediaCandidate {
   createdAt: number;
 }
 
+export interface ToonflowChapter {
+  id: string;
+  index: number;
+  title: string;
+  content: string;
+  wordCount: number;
+}
+
+export interface ToonflowEventNode {
+  id: string;
+  code: string;
+  stage: string;
+  title: string;
+  summary: string;
+  cause: string;
+  effect: string;
+  conflict: string;
+  emotion: string;
+  location: string;
+  characters: string[];
+  durationSec: number;
+}
+
+export interface ToonflowSceneBlock {
+  id: string;
+  eventId: string;
+  code: string;
+  stage: string;
+  heading: string;
+  action: string;
+  dialogue: string;
+  innerThought?: string;
+  directorNote?: string;
+  emotion: string;
+}
+
+export interface ToonflowSupervisionIssue {
+  segmentCode?: string;
+  category: "alur" | "karakter" | "kontinuitas" | "visual" | "dialog";
+  severity: "high" | "medium";
+  problem: string;
+  fix: string;
+}
+
+export interface ToonflowSupervisionReport {
+  checkedAt: number;
+  score: number;
+  verdict: "siap" | "perlu-revisi";
+  summary: string;
+  strengths: string[];
+  issues: ToonflowSupervisionIssue[];
+}
+
 export interface ScriptNodeData {
   kind: "script";
   premise: string;
   scriptText: string;
   aspectRatio: AspectRatio;
   maxSegmentSec: number;
+  targetSegments?: number;
   visualStyle: string;
   beats: ScriptBeat[];
+  sourceText?: string;
+  chapters?: ToonflowChapter[];
+  activeChapterId?: string;
+  eventGraph?: ToonflowEventNode[];
+  structuredScenes?: ToonflowSceneBlock[];
+  supervision?: ToonflowSupervisionReport;
 }
 
 export interface AssetNodeData {
@@ -47,6 +113,7 @@ export interface AssetNodeData {
 export interface SegmentNodeData {
   kind: "segment";
   code: string;
+  storyStage?: string;
   durationSec: number;
   shotSize: ShotSize;
   cameraAngle: CameraAngle;
@@ -54,6 +121,7 @@ export interface SegmentNodeData {
   timelineText: string;
   dialogue: string;
   continuityLock: string;
+  visualPrompt?: string;
   candidates: MediaCandidate[];
   adoptedId?: string;
 }

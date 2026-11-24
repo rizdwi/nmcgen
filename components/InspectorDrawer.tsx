@@ -27,14 +27,17 @@ import {
   VISUAL_STYLE_PRESETS,
 } from "@/lib/presets";
 import { callAi, fileToDataUrl } from "@/lib/storage";
+import { buildConversationalEditPrompt, parseConversationalEditResponse } from "@/lib/toonflow";
 import {
   buildSrt,
   composeGoogleFlowPrompt,
+  composeSegmentImagePrompt,
   composeSegmentPrompt,
   estimateDialogueSeconds,
   getBoundAssets,
   getOrderedSegments,
   getPrimaryScript,
+  selectSegmentReferenceImages,
 } from "@/lib/validator";
 import { CloseIcon } from "./Icons";
 
@@ -53,6 +56,7 @@ interface InspectorDrawerProps {
     profileId: string,
     discovered: { textModels: string[]; imageModels: string[]; fetchedAt: number },
   ) => void;
+  onOpenToonflow?: () => void;
   onOpenPipeline: () => void;
   onOpenSettings: () => void;
   onClose: () => void;
@@ -61,6 +65,32 @@ interface InspectorDrawerProps {
 const SHOT_SIZES: ShotSize[] = ["WS", "MS", "MCU", "CU", "ECU"];
 const ANGLES: CameraAngle[] = ["Front", "Side 90", "Rear 3/4", "High", "Low"];
 const MOTIONS: CameraMotion[] = ["Push-In", "Pull-Out", "Static", "Pan Right", "Pan Left"];
+
+function defaultStagesForCount(count: number): string[] {
+  if (count <= 3) return ["Intro / Perkenalan", "Konflik & Klimaks", "Ending / Resolusi"];
+  if (count === 4) return ["Intro / Perkenalan", "Masalah 1", "Klimaks", "Ending / Resolusi"];
+  if (count === 5) {
+    return [
+      "Intro / Perkenalan",
+      "Masalah 1 (Pemicu)",
+      "Masalah 2 (Eskalasi)",
+      "Klimaks",
+      "Ending / Resolusi",
+    ];
+  }
+  const mid = Array.from({ length: count - 3 }, (_, i) => `Masalah ${i + 1}`);
+  return ["Intro / Perkenalan", ...mid, "Klimaks", "Ending / Resolusi"];
+}
+
+function asShotSize(v: unknown, fallback: ShotSize): ShotSize {
+  return SHOT_SIZES.includes(v as ShotSize) ? (v as ShotSize) : fallback;
+}
+function asAngle(v: unknown, fallback: CameraAngle): CameraAngle {
+  return ANGLES.includes(v as CameraAngle) ? (v as CameraAngle) : fallback;
+}
+function asMotion(v: unknown, fallback: CameraMotion): CameraMotion {
+  return MOTIONS.includes(v as CameraMotion) ? (v as CameraMotion) : fallback;
+}
 
 export default function InspectorDrawer({
   project,
@@ -74,6 +104,7 @@ export default function InspectorDrawer({
   onDeleteEdge,
   onSyncBeatsToSegments,
   onSyncDiscoveredModels,
+  onOpenToonflow,
   onOpenPipeline,
   onOpenSettings,
   onClose,
@@ -82,6 +113,7 @@ export default function InspectorDrawer({
   const [errMsg, setErrMsg] = useState("");
   const [okMsg, setOkMsg] = useState("");
   const [connectTargetId, setConnectTargetId] = useState("");
+  const [editInstruction, setEditInstruction] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const meta = NODE_META[node.kind];
@@ -106,35 +138,47 @@ export default function InspectorDrawer({
       setErrMsg("Isi premis singkat atau judul proyek terlebih dahulu sebelum generate naskah.");
       return;
     }
-    setBusyMsg("Menyusun naskah adegan via AI...");
+    const segCount = Math.max(3, Math.min(12, d.targetSegments || 5));
+    const stagePlan = defaultStagesForCount(segCount)
+      .map((label, i) => `Segmen ${i + 1} (${label})`)
+      .join(" -> ");
+
+    setBusyMsg("Menyusun naskah film pendek berstruktur via AI...");
     setErrMsg("");
     setOkMsg("");
     try {
       const modeHint =
         d.maxSegmentSec === 8
-          ? "Target video Google Flow (Veo) dengan potongan klip 8 detik yang padat, sinematik, dan visual."
-          : `Target klip berdurasi maksimal ${d.maxSegmentSec} detik per segmen.`;
+          ? `Tulis tepat ${segCount} babak pendek (masing-masing ~7-8 detik untuk klip Google Flow / Veo).`
+          : `Tulis tepat ${segCount} babak pendek dengan durasi maks ${d.maxSegmentSec} detik per segmen.`;
       const prompt = [
-        "Tulis naskah adegan film pendek dalam bahasa Indonesia yang siap diproduksi menjadi storyboard & video AI.",
-        "Gunakan format skenario ringkas: Heading adegan (INT./EXT. LOKASI - WAKTU), deskripsi aksi visual dan pencahayaan yang konkret, serta dialog natural singkat per karakter.",
-        `Judul proyek: ${project.name}`,
+        "Tulis naskah film pendek utuh dalam bahasa Indonesia yang memiliki CERITA INTI JELAS dan ALUR DRAMATIS LENGKAP, bukan potongan suasana acak.",
+        `Struktur wajib (${segCount} babak berurutan dengan hubungan sebab-akibat nyata): ${stagePlan}.`,
+        "Aturan cerita wajib:",
+        "1. Kenalkan tokoh utama (nama, karakter, tujuan/taruhan emosional konkret) sejak Babak 1 (Intro). Jangan langsung memunculkan ancaman puncak di babak perkenalan.",
+        "2. Setiap babak harus memicu babak berikutnya secara logis (sebab -> akibat), bukan transisi potongan acak.",
+        "3. Pada babak Masalah 1 dan Masalah 2, tunjukkan rintangan konkret, upaya tokoh yang sempat gagal, dan petunjuk/kelemahan lawan.",
+        "4. Pada Klimaks, tokoh mengambil keputusan aktif dan aksi penentu untuk menghadapi konflik.",
+        "5. Pada Ending/Resolusi, berikan penyelesaian yang tuntas atas tujuan awal tokoh (dilarang menggantung asal-asalan hanya dengan teriak lalu cut to black).",
+        "6. Setiap babak gunakan format: BABAK N [Nama Babak], Heading lokasi (INT./EXT. LOKASI - WAKTU), aksi visual konkret & variasi ruang/sudut kamera, serta 1-2 baris dialog Indonesia yang natural dan singkat (maks 12 kata agar pas dibaca dalam 7-8 detik).",
+        `Judul episode: ${project.name}`,
         `Premis: ${seed}`,
         `Rasio video: ${d.aspectRatio}`,
         `Gaya visual: ${d.visualStyle || "Sinematik realistis"}`,
         modeHint,
-        "Balas langsung dengan teks naskah adegan tanpa pembuka atau komentar tambahan.",
+        "Balas langsung dengan naskah lengkap tanpa kata pengantar.",
       ].join("\n");
 
       const res = await callAi(textProfile, "text", {
         system:
-          "Kamu adalah penulis skenario dan sutradara visual. Tulis naskah adegan ringkas, visual, spesifik pada aksi kamera dan dialog pendek yang realistis.",
+          "Kamu adalah penulis skenario dan sutradara film pendek pemenang festival. Setiap naskah wajib punya tokoh dengan motivasi jelas, konflik bertahap sebab-akibat, klimaks aktif, dan resolusi emosional yang utuh.",
         prompt,
       });
       if (res.discovered) {
         onSyncDiscoveredModels(textProfile.id, res.discovered);
       }
       if (!res.ok || !res.text?.trim()) {
-        setErrMsg(res.error || "Provider AI tidak mengembalikan naskah. Cek API key di Pengaturan.");
+        setErrMsg(res.error || "Provider AI tidak mengembalikan naskah. Cek pengaturan provider AI.");
         return;
       }
       patchData<ScriptNodeData>({ scriptText: res.text.trim() });
@@ -153,26 +197,34 @@ export default function InspectorDrawer({
       setErrMsg("Isi premis atau naskah terlebih dahulu sebelum memecah beat.");
       return;
     }
-    setBusyMsg("Memecah naskah ke daftar beat via AI...");
+    const segCount = Math.max(3, Math.min(12, d.targetSegments || 5));
+    const stages = defaultStagesForCount(segCount);
+
+    setBusyMsg(`Memecah naskah ke ${segCount} beat alur cerita via AI...`);
     setErrMsg("");
     setOkMsg("");
     try {
       const prompt = [
-        "Pecah premis/naskah berikut menjadi daftar beat berurutan dalam format JSON array murni (tanpa markdown codefence).",
-        'Format tiap objek: {"code":"E01","durationSec":4,"summary":"aksi visual singkat","dialogue":"dialog atau string kosong"}.',
+        `Pecah naskah/premis berikut menjadi TEPAT ${segCount} beat berurutan yang membentuk alur film pendek utuh dalam format JSON array murni (tanpa markdown codefence).`,
+        `Urutan babak wajib: ${stages.map((s, i) => `E0${i + 1}="${s}"`).join(", ")}.`,
+        'Format tiap objek: {"code":"E01","stage":"Intro / Perkenalan","durationSec":8,"summary":"aksi visual konkret dalam bahasa Indonesia dengan sebab-akibat jelas","dialogue":"dialog Indonesia natural maks 12 kata","continuityLock":"kondisi visual/properti/cahaya yang tersambung dari babak sebelumnya","shotSize":"WS","cameraAngle":"Front","cameraMotion":"Push-In","visualPrompt":"detailed English cinematic movie still prompt describing this exact framing, character pose, facial emotion, distinct setting angle, and dramatic lighting without any text or subtitles"}.',
+        "Nilai valid: shotSize in [WS,MS,MCU,CU,ECU], cameraAngle in [Front,Side 90,Rear 3/4,High,Low], cameraMotion in [Static,Push-In,Pull-Out,Pan Right,Pan Left].",
+        "Wajib bedakan shotSize, cameraAngle, dan komposisi ruang antar beat berturut-turut agar tidak terasa monoton di tempat/sudut yang sama.",
         `Rasio: ${d.aspectRatio}, batas durasi per segmen: ${d.maxSegmentSec} detik.`,
+        `Gaya visual: ${d.visualStyle}`,
         `Premis: ${d.premise}`,
         `Naskah:\n${d.scriptText}`,
       ].join("\n");
       const res = await callAi(textProfile, "text", {
-        system: "Kamu adalah sutradara drama pendek. Balas HANYA dengan JSON array valid.",
+        system:
+          "Kamu adalah sutradara storyboard film pendek. Balas HANYA dengan JSON array valid sesuai jumlah beat yang diminta, dengan alur cerita sebab-akibat utuh dan visualPrompt bahasa Inggris yang sinematik.",
         prompt,
       });
       if (res.discovered) {
         onSyncDiscoveredModels(textProfile.id, res.discovered);
       }
       if (!res.ok || !res.text) {
-        setErrMsg(res.error || "Provider AI tidak mengembalikan teks. Cek API key di Pengaturan.");
+        setErrMsg(res.error || "Provider AI tidak mengembalikan teks. Cek pengaturan provider AI.");
         return;
       }
       const match = res.text.match(/\[[\s\S]*\]/);
@@ -185,17 +237,26 @@ export default function InspectorDrawer({
         setErrMsg("Daftar beat dari AI kosong.");
         return;
       }
+      const fallbackShots: ShotSize[] = ["WS", "MS", "MCU", "CU", "WS"];
+      const fallbackAngles: CameraAngle[] = ["Front", "Side 90", "Low", "Rear 3/4", "High"];
+      const fallbackMotions: CameraMotion[] = ["Push-In", "Pan Right", "Push-In", "Pull-Out", "Pull-Out"];
       const beats = parsed.map((item: Record<string, unknown>, idx: number) => ({
         id: uid(),
         code: String(item.code || `E${String(idx + 1).padStart(2, "0")}`),
-        durationSec: Math.max(1, Math.min(30, Number(item.durationSec) || 4)),
+        stage: String(item.stage || stages[idx] || `Babak ${idx + 1}`),
+        durationSec: Math.max(1, Math.min(d.maxSegmentSec || 30, Number(item.durationSec) || Math.min(d.maxSegmentSec || 8, 8))),
         summary: String(item.summary || ""),
         dialogue: String(item.dialogue || ""),
+        continuityLock: typeof item.continuityLock === "string" ? item.continuityLock : "",
+        shotSize: asShotSize(item.shotSize, fallbackShots[idx % fallbackShots.length]),
+        cameraAngle: asAngle(item.cameraAngle, fallbackAngles[idx % fallbackAngles.length]),
+        cameraMotion: asMotion(item.cameraMotion, fallbackMotions[idx % fallbackMotions.length]),
+        visualPrompt: typeof item.visualPrompt === "string" ? item.visualPrompt : "",
       }));
       patchData<ScriptNodeData>({ beats });
       const modelNote = res.usedModel ? ` via ${res.usedModel}` : "";
       const fbNote = res.fallbackNotes?.length ? ` (fallback dari: ${res.fallbackNotes.join(", ")})` : "";
-      setOkMsg(`${beats.length} beat berhasil disusun${modelNote}${fbNote}. Klik "Buat Segmen dari Beat" untuk menerapkannya.`);
+      setOkMsg(`${beats.length} beat alur cerita berhasil disusun${modelNote}${fbNote}. Klik "Buat Segmen dari Beat" untuk menerapkannya.`);
     } catch (err) {
       setErrMsg(`Gagal memproses beat: ${(err as Error).message}`);
     } finally {
@@ -246,12 +307,9 @@ export default function InspectorDrawer({
   };
 
   const handleGenerateSegmentFrame = async (d: SegmentNodeData) => {
-    const prompt = composeSegmentPrompt(project, node);
+    const prompt = composeSegmentImagePrompt(project, node);
     const script = getPrimaryScript(project);
-    const boundAssets = getBoundAssets(project, node.id);
-    const refImages = boundAssets
-      .map((a) => (a.data as AssetNodeData).imageDataUrl)
-      .filter((x): x is string => Boolean(x));
+    const refImages = selectSegmentReferenceImages(project, node);
 
     setBusyMsg(`Membuat frame kandidat ${d.code} via ${imageProfile.name}...`);
     setErrMsg("");
@@ -288,6 +346,76 @@ export default function InspectorDrawer({
       setOkMsg(`Frame kandidat ditambahkan${modelNote}${fbNote}.`);
     } catch (err) {
       setErrMsg(`Gagal membuat frame: ${(err as Error).message}`);
+    } finally {
+      setBusyMsg("");
+    }
+  };
+
+  const handleConversationalEditFrame = async (d: SegmentNodeData) => {
+    const instruction = editInstruction.trim();
+    if (!instruction) {
+      setErrMsg("Tulis instruksi revisi terlebih dahulu (mis. ubah sudut kamera lebih dekat atau tambah hujan).");
+      return;
+    }
+    const script = getPrimaryScript(project);
+    const boundTags = getBoundAssets(project, node.id).map((a) => (a.data as AssetNodeData).tag);
+    setBusyMsg(`Merevisi arahan shot ${d.code} via AI...`);
+    setErrMsg("");
+    setOkMsg("");
+    try {
+      const built = buildConversationalEditPrompt({
+        segment: d,
+        instruction,
+        visualStyle: script?.visualStyle || "cinematic realistic film",
+        boundAssetTags: boundTags,
+      });
+      const textRes = await callAi(textProfile, "text", built);
+      if (textRes.discovered) onSyncDiscoveredModels(textProfile.id, textRes.discovered);
+      if (!textRes.ok || !textRes.text) {
+        setErrMsg(textRes.error || "Gagal memproses instruksi revisi frame.");
+        return;
+      }
+      const patch = parseConversationalEditResponse(textRes.text, d);
+      const updatedSeg: SegmentNodeData = { ...d, ...patch };
+      const updatedNode: CanvasNode = { ...node, data: updatedSeg };
+      const updatedProject: NmcProject = {
+        ...project,
+        nodes: project.nodes.map((n) => (n.id === node.id ? updatedNode : n)),
+      };
+      patchData<SegmentNodeData>(patch);
+
+      setBusyMsg(`Membuat ulang gambar ${d.code} sesuai revisi...`);
+      const imgPrompt = composeSegmentImagePrompt(updatedProject, updatedNode);
+      const refImages = selectSegmentReferenceImages(updatedProject, updatedNode);
+      const imgRes = await callAi(imageProfile, "image", {
+        prompt: imgPrompt,
+        aspectRatio: script?.aspectRatio ?? "16:9",
+        referenceImages: refImages,
+      });
+      if (imgRes.discovered) onSyncDiscoveredModels(imageProfile.id, imgRes.discovered);
+      if (!imgRes.ok || !imgRes.image) {
+        setErrMsg(imgRes.error || "Prompt shot diperbarui, tetapi gagal menghasilkan gambar revisi.");
+        return;
+      }
+      const candId = uid();
+      patchData<SegmentNodeData>({
+        ...patch,
+        candidates: [
+          ...d.candidates,
+          {
+            id: candId,
+            kind: "image",
+            label: `Revisi #${d.candidates.length + 1}`,
+            dataUrl: imgRes.image,
+            createdAt: Date.now(),
+          },
+        ],
+        adoptedId: candId,
+      });
+      setEditInstruction("");
+      setOkMsg(`Shot & keyframe ${d.code} berhasil direvisi dan diadopsi.`);
+    } catch (err) {
+      setErrMsg(`Gagal merevisi frame: ${(err as Error).message}`);
     } finally {
       setBusyMsg("");
     }
@@ -413,6 +541,21 @@ export default function InspectorDrawer({
           const d = node.data as ScriptNodeData;
           return (
             <>
+              {onOpenToonflow ? (
+                <div className="sectionBox">
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                    <h3>Pipeline Toonflow (7 Tahap)</h3>
+                    <button type="button" className="btn btnPrimary btnSm" onClick={onOpenToonflow}>
+                      Buka Pipeline Toonflow
+                    </button>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 12, color: "var(--ink-muted)" }}>
+                    Materi/Bab, Event Graph sebab-akibat, Ekstraksi Aset, ScriptAgent, Storyboard Batch, dan Audit
+                    Supervisor dalam satu alur.
+                  </p>
+                </div>
+              ) : null}
+
               <div className="fieldRow">
                 <div className="fieldGroup">
                   <label className="fieldLabel" htmlFor="scr-aspect">
@@ -445,28 +588,47 @@ export default function InspectorDrawer({
                 </div>
               </div>
 
-              <div className="fieldGroup">
-                <label className="fieldLabel" htmlFor="scr-style-preset">
-                  Pilihan Gaya Visual Proyek
-                </label>
-                <select
-                  id="scr-style-preset"
-                  className="select"
-                  value={matchVisualStylePreset(d.visualStyle)}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val === "custom") return;
-                    const preset = VISUAL_STYLE_PRESETS.find((p) => p.id === val);
-                    if (preset) patchData<ScriptNodeData>({ visualStyle: preset.prompt });
-                  }}
-                >
-                  {VISUAL_STYLE_PRESETS.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.label}
-                    </option>
-                  ))}
-                  <option value="custom">Kustom (Tulis Sendiri)</option>
-                </select>
+              <div className="fieldRow">
+                <div className="fieldGroup">
+                  <label className="fieldLabel" htmlFor="scr-target-segs">
+                    Target Jumlah Segmen (Alur Cerita)
+                  </label>
+                  <select
+                    id="scr-target-segs"
+                    className="select"
+                    value={d.targetSegments ?? 5}
+                    onChange={(e) => patchData<ScriptNodeData>({ targetSegments: Number(e.target.value) })}
+                  >
+                    <option value={3}>3 segmen (Intro - Konflik - Ending)</option>
+                    <option value={4}>4 segmen (Intro - Masalah - Klimaks - Ending)</option>
+                    <option value={5}>5 segmen (Intro - Masalah 1 - Masalah 2 - Klimaks - Ending)</option>
+                    <option value={6}>6 segmen (Alur Episode Panjang)</option>
+                    <option value={8}>8 segmen (Film Pendek Lengkap)</option>
+                  </select>
+                </div>
+                <div className="fieldGroup">
+                  <label className="fieldLabel" htmlFor="scr-style-preset">
+                    Pilihan Gaya Visual Proyek
+                  </label>
+                  <select
+                    id="scr-style-preset"
+                    className="select"
+                    value={matchVisualStylePreset(d.visualStyle)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === "custom") return;
+                      const preset = VISUAL_STYLE_PRESETS.find((p) => p.id === val);
+                      if (preset) patchData<ScriptNodeData>({ visualStyle: preset.prompt });
+                    }}
+                  >
+                    {VISUAL_STYLE_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                    <option value="custom">Kustom (Tulis Sendiri)</option>
+                  </select>
+                </div>
               </div>
 
               <div className="fieldGroup">
@@ -585,8 +747,9 @@ export default function InspectorDrawer({
                           gap: 6,
                         }}
                       >
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                           <span className="metaTag mono">{b.code}</span>
+                          {b.stage ? <span className="metaTag">{b.stage}</span> : null}
                           <input
                             type="number"
                             min={1}
@@ -843,6 +1006,19 @@ export default function InspectorDrawer({
               </div>
 
               <div className="fieldGroup">
+                <label className="fieldLabel" htmlFor="seg-stage">
+                  Babak Cerita (Alur Film)
+                </label>
+                <input
+                  id="seg-stage"
+                  className="input"
+                  value={d.storyStage ?? ""}
+                  onChange={(e) => patchData<SegmentNodeData>({ storyStage: e.target.value })}
+                  placeholder="Contoh: Intro / Perkenalan, Masalah 1, Masalah 2, Klimaks, Ending"
+                />
+              </div>
+
+              <div className="fieldGroup">
                 <label className="fieldLabel" htmlFor="seg-timeline">
                   Timeline Aksi per Detik
                 </label>
@@ -852,6 +1028,20 @@ export default function InspectorDrawer({
                   value={d.timelineText}
                   onChange={(e) => patchData<SegmentNodeData>({ timelineText: e.target.value })}
                   placeholder="[0:00-0:04] Deskripsi visual adegan..."
+                />
+              </div>
+
+              <div className="fieldGroup">
+                <label className="fieldLabel" htmlFor="seg-visual-prompt">
+                  Prompt Still Frame Visual (Opsional, Inggris lebih akurat untuk AI Gambar)
+                </label>
+                <textarea
+                  id="seg-visual-prompt"
+                  className="textarea"
+                  style={{ minHeight: 62 }}
+                  value={d.visualPrompt ?? ""}
+                  onChange={(e) => patchData<SegmentNodeData>({ visualPrompt: e.target.value })}
+                  placeholder="Kosongkan untuk pakai Timeline Aksi di atas..."
                 />
               </div>
 
@@ -920,6 +1110,31 @@ export default function InspectorDrawer({
                   >
                     Generate Frame (AI)
                   </button>
+                </div>
+
+                <div className="fieldGroup" style={{ marginTop: 4 }}>
+                  <label className="fieldLabel" htmlFor="seg-conv-edit">
+                    Revisi Frame Percakapan (Toonflow AI Editor)
+                  </label>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input
+                      id="seg-conv-edit"
+                      className="input"
+                      style={{ minHeight: 32, padding: "4px 8px", flex: 1 }}
+                      value={editInstruction}
+                      disabled={Boolean(busyMsg)}
+                      onChange={(e) => setEditInstruction(e.target.value)}
+                      placeholder="Contoh: dekatkan kamera ke wajah, pencahayaan lebih dramatis..."
+                    />
+                    <button
+                      type="button"
+                      className="btn btnSm"
+                      disabled={Boolean(busyMsg) || !editInstruction.trim()}
+                      onClick={() => handleConversationalEditFrame(d)}
+                    >
+                      Revisi AI
+                    </button>
+                  </div>
                 </div>
 
                 {d.candidates.length === 0 ? (
