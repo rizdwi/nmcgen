@@ -27,7 +27,11 @@ import {
   VISUAL_STYLE_PRESETS,
 } from "@/lib/presets";
 import { callAi, fileToDataUrl } from "@/lib/storage";
-import { buildConversationalEditPrompt, parseConversationalEditResponse } from "@/lib/toonflow";
+import {
+  buildAssetReferenceImagePrompt,
+  buildConversationalEditPrompt,
+  parseConversationalEditResponse,
+} from "@/lib/toonflow";
 import {
   buildSrt,
   composeGoogleFlowPrompt,
@@ -274,12 +278,7 @@ export default function InspectorDrawer({
     setErrMsg("");
     setOkMsg("");
     try {
-      const template =
-        d.category === "character"
-          ? `4-view character turnaround reference sheet on plain neutral studio background: head close-up, full-body front, 90-degree side profile, full-body back. No text, no watermark. Style: ${script?.visualStyle || "realistic film"}. Subject: ${d.lockPrompt}`
-          : d.category === "location"
-            ? `Master spatial view of an empty location with NO people and NO silhouettes. Clear foreground, midground, background, no text. Style: ${script?.visualStyle || "realistic film"}. Location: ${d.lockPrompt}`
-            : `2x2 prop turnaround sheet (front, side, back, detail) on clean studio background, no hands, no people, no text. Style: ${script?.visualStyle || "realistic film"}. Prop: ${d.lockPrompt}`;
+      const template = buildAssetReferenceImagePrompt(d, script?.visualStyle || "realistic film");
 
       const res = await callAi(imageProfile, "image", {
         prompt: template,

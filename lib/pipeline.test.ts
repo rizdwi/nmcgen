@@ -42,6 +42,7 @@ import {
 import { mergeProjects, projectToSupabaseRow } from "./supabaseSync.ts";
 import {
   applyExtractedAssetsToProject,
+  buildAssetReferenceImagePrompt,
   cleanSourceText,
   formatScenesToScreenplay,
   parseConversationalEditResponse,
@@ -183,9 +184,10 @@ assert.ok(prompt.includes("@TokohA"));
 assert.ok(prompt.includes("@Stasiun"));
 
 const imgPrompt = composeSegmentImagePrompt(fixture, seg1);
-assert.ok(imgPrompt.includes("Single full-bleed cinematic film frame"));
+assert.ok(imgPrompt.includes("Single full-bleed cinematic movie frame"));
 assert.equal(imgPrompt.includes("Keretanya sebentar lagi tiba."), false, "Still image prompt must not leak spoken dialogue");
 assert.equal(imgPrompt.includes("[0:00-0:07]"), false, "Still image prompt must not leak timecodes");
+assert.equal(imgPrompt.includes("@TokohA"), false, "Still image prompt must resolve @Tags so diffusion models never print @ text");
 
 // Close-up segment should prioritize character refs and skip wide location ref image (without mutating shared fixture)
 const cuProject: NmcProject = {
@@ -298,6 +300,7 @@ const cfDiscovered = classifyAndRankModels("CloudflareAI", [
   { id: "@cf/aisingapore/gemma-sea-lion-v4-27b-it" },
   { id: "@cf/black-forest-labs/flux-1-schnell" },
   { id: "@cf/black-forest-labs/flux-2-klein-4b" },
+  { id: "@cf/black-forest-labs/flux-2-klein-9b" },
   { id: "@cf/leonardo/phoenix-1.0" },
 ]);
 assert.equal(cfDiscovered.textModels[0], CLOUDFLARE_FREE_TEXT_MODELS[0]);
@@ -305,6 +308,7 @@ assert.equal(cfDiscovered.textModels.includes("@cf/meta/llama-guard-3-8b"), fals
 assert.deepEqual(cfDiscovered.imageModels, [
   CLOUDFLARE_FREE_IMAGE_MODELS[0],
   CLOUDFLARE_FREE_IMAGE_MODELS[1],
+  CLOUDFLARE_FREE_IMAGE_MODELS[2],
   "@cf/leonardo/phoenix-1.0",
 ]);
 assert.equal(isCloudflareMultipartImageModel("@cf/black-forest-labs/flux-2-klein-4b"), true);
@@ -350,17 +354,25 @@ assert.deepEqual(parsedEvents[0].characters, ["@Raka"]);
 
 const extractedAssets = parseExtractedAssets(
   JSON.stringify([
-    { tag: "@Raka", title: "Raka", category: "character", lockPrompt: "Indonesian man 26yo olive jacket DSLR camera" },
+    { tag: "@Raka", title: "Raka", category: "character", lockPrompt: "26-year-old Indonesian man olive jacket DSLR camera" },
+    { tag: "@Nadia", title: "Nadia", category: "character", lockPrompt: "12-year-old Indonesian girl mustard yellow hoodie" },
     { tag: "@Monster", title: "Monster Gudang", category: "character", lockPrompt: "3m stone and black smoke monster amber eyes" },
+    { tag: "@Gudang", title: "Gudang Rempah", category: "location", lockPrompt: "Interior of dilapidated colonial spice warehouse with wooden crates" },
   ]),
 );
 const tfStarter = createStarterProject("Tes Toonflow", { aspectRatio: "16:9", maxSegmentSec: 8 });
 const withAssets = applyExtractedAssetsToProject(tfStarter, extractedAssets);
-assert.equal(withAssets.addedCount, 2);
+assert.equal(withAssets.addedCount, 4);
+assert.ok(
+  buildAssetReferenceImagePrompt(
+    { kind: "asset", tag: "@Nadia", category: "character", lockPrompt: "12-year-old Indonesian girl yellow hoodie" },
+    "Neo-noir",
+  ).includes("Single full-body front-facing studio character reference portrait"),
+);
 
 const parsedScenes = parseScriptAgentResponse(
   JSON.stringify([
-    { code: "SC01", stage: "Intro / Perkenalan", heading: "EXT. GERBANG - MALAM", action: "@Raka memungut syal.", dialogue: "Nadia, kamu di dalam?", emotion: "cemas" },
+    { code: "SC01", stage: "Intro / Perkenalan", heading: "EXT. JALANAN KOTA TUA - MALAM", action: "@Raka memungut syal di depan gerbang.", dialogue: "Nadia, kamu di dalam?", emotion: "cemas" },
     { code: "SC02", stage: "Masalah 1 (Pemicu)", heading: "INT. GUDANG - MALAM", action: "@Monster keluar dari tembok.", dialogue: "Jangan mendekat!", emotion: "panik" },
   ]),
   parsedEvents,
@@ -369,8 +381,8 @@ assert.ok(formatScenesToScreenplay(parsedScenes).includes("BABAK 1 [Intro / Perk
 
 const sbBeats = parseStoryboardBeats(
   JSON.stringify([
-    { code: "E01", stage: "Intro / Perkenalan", durationSec: 8, summary: "@Raka memungut syal di gerbang.", dialogue: "Nadia, kamu di dalam?", continuityLock: "Syal di tangan kiri", shotSize: "WS", cameraAngle: "Front", cameraMotion: "Push-In", visualPrompt: "Wide rainy street shot of Raka picking up a yellow scarf" },
-    { code: "E02", stage: "Masalah 1 (Pemicu)", durationSec: 8, summary: "@Raka menghadapi @Monster di gudang.", dialogue: "Jangan mendekat!", continuityLock: "Dalam gudang gelap", shotSize: "WS", cameraAngle: "Front", cameraMotion: "Pan Right", visualPrompt: "Inside dark warehouse, stone monster rising behind wooden crates" },
+    { code: "E01", stage: "Intro / Perkenalan", durationSec: 8, visibleAssets: ["@Raka"], summary: "@Raka memungut syal @Nadia di trotoar luar depan @Gudang.", dialogue: "Nadia, kamu di dalam?", continuityLock: "Syal di tangan kiri", shotSize: "WS", cameraAngle: "Front", cameraMotion: "Push-In", visualPrompt: "Wide exterior rainy cobblestone street shot of a 26-year-old Indonesian man picking up a yellow scarf" },
+    { code: "E02", stage: "Masalah 1 (Pemicu)", durationSec: 8, visibleAssets: ["@Raka", "@Nadia", "@Monster", "@Gudang"], summary: "@Raka dan @Nadia menghadapi @Monster di dalam @Gudang.", dialogue: "Jangan mendekat!", continuityLock: "Dalam gudang gelap", shotSize: "WS", cameraAngle: "Front", cameraMotion: "Pan Right", visualPrompt: "Inside dark warehouse, stone monster rising behind wooden crates" },
   ]),
   parsedEvents,
   parsedScenes,
@@ -382,10 +394,14 @@ assert.notEqual(sbBeats[0].cameraAngle, sbBeats[1].cameraAngle);
 const rebuiltTf = rebuildSegmentsFromBeats(withAssets.project, sbBeats, { replaceExisting: true });
 const rebuiltSegs = rebuiltTf.nodes.filter((n) => n.kind === "segment");
 assert.equal(rebuiltSegs.length, 2);
-// Selective asset wiring: G01 only mentions @Raka, so @Monster must NOT be wired into G01
+// Strict visible-only wiring: G01 is EXT with only @Raka visible -> @Nadia, @Monster, and interior @Gudang must NOT be wired
 const g01Incoming = rebuiltTf.edges.filter((e) => e.target === rebuiltSegs[0].id).map((e) => e.source);
+const nadiaAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Nadia")!;
 const monsterAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Monster")!;
-assert.equal(g01Incoming.includes(monsterAsset.id), false, "Monster asset must not be wired into Intro beat before it appears");
+const gudangAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Gudang")!;
+assert.equal(g01Incoming.includes(nadiaAsset.id), false, "Nadia mentioned only in dialogue must not be wired into Intro");
+assert.equal(g01Incoming.includes(monsterAsset.id), false, "Monster must not be wired into Intro before it appears");
+assert.equal(g01Incoming.includes(gudangAsset.id), false, "Interior warehouse must not be wired into exterior street shot");
 
 const convPatch = parseConversationalEditResponse(
   JSON.stringify({ shotSize: "CU", cameraAngle: "Low", cameraMotion: "Static", timelineSummary: "Wajah Raka tegang.", visualPrompt: "Close-up low angle of Raka sweating in rain" }),

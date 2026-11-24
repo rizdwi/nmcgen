@@ -391,16 +391,36 @@ async function runCloudflareImageOnce(
     });
 
     if (aiBinding) {
-      try {
-        const formRes = new Response(form);
-        const contentType = formRes.headers.get("content-type") || "multipart/form-data";
-        const raw = await aiBinding.run(model, {
-          multipart: { body: formRes.body, contentType },
-        });
-        return await extractWorkersAiImageDataUrl(raw);
-      } catch (err) {
-        throw toWorkersAiHttpErr(err);
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const attemptForm = new FormData();
+          attemptForm.append("prompt", cleanPrompt);
+          attemptForm.append("width", String(width));
+          attemptForm.append("height", String(height));
+          referenceImages.slice(0, 4).forEach((dataUrl, idx) => {
+            const decoded = dataUrlToBlob(dataUrl);
+            if (decoded) {
+              attemptForm.append(`input_image_${idx}`, decoded.blob, `ref_${idx}.${decoded.ext}`);
+            }
+          });
+          const formRes = new Response(attemptForm);
+          const contentType = formRes.headers.get("content-type") || "multipart/form-data";
+          const raw = await aiBinding.run(model, {
+            multipart: { body: formRes.body, contentType },
+          });
+          return await extractWorkersAiImageDataUrl(raw);
+        } catch (err) {
+          lastErr = err;
+          const he = toWorkersAiHttpErr(err);
+          if (attempt === 0 && (he.status === 429 || he.status >= 500)) {
+            await new Promise((r) => setTimeout(r, 1200));
+            continue;
+          }
+          throw he;
+        }
       }
+      throw toWorkersAiHttpErr(lastErr);
     }
 
     const creds = parseCloudflareRestCredentials(p.baseUrl, key, process?.env);

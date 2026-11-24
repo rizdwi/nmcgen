@@ -32,8 +32,8 @@ export const CLOUDFLARE_FREE_TEXT_MODELS = [
 
 export const CLOUDFLARE_FREE_IMAGE_MODELS = [
   "@cf/black-forest-labs/flux-2-klein-4b",
-  "@cf/black-forest-labs/flux-1-schnell",
   "@cf/black-forest-labs/flux-2-klein-9b",
+  "@cf/black-forest-labs/flux-1-schnell",
   "@cf/leonardo/phoenix-1.0",
   "@cf/leonardo/lucid-origin",
 ];

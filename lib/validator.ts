@@ -161,47 +161,23 @@ export function composeSegmentPrompt(project: NmcProject, segmentNode: CanvasNod
   return lines.join("\n");
 }
 
-// Pure visual prompt for still-image models: excludes dialogue quotes and timecodes to avoid text artifacts.
-export function composeSegmentImagePrompt(project: NmcProject, segmentNode: CanvasNode): string {
-  if (segmentNode.data.kind !== "segment") return "";
-  const seg = segmentNode.data;
-  const script = getPrimaryScript(project);
-  const boundAssets = getBoundAssets(project, segmentNode.id);
-
-  const actionText = (seg.visualPrompt?.trim() || seg.timelineText)
-    .split(/\r?\n/)
-    .map((l) => l.replace(/^\[[^\]]+\]\s*/, "").trim())
-    .filter(Boolean)
-    .join(" ");
-
-  const parts: string[] = [
-    `Single full-bleed cinematic film frame, ${FLOW_SHOT_LABELS[seg.shotSize]}, ${FLOW_ANGLE_LABELS[seg.cameraAngle]}.`,
-  ];
-  if (script?.visualStyle) parts.push(`Visual style: ${script.visualStyle}.`);
-  if (actionText) parts.push(`Scene action and composition: ${actionText}.`);
-  if (boundAssets.length > 0) {
-    const desc = boundAssets
-      .map((a) => {
-        const d = a.data as AssetNodeData;
-        return `${d.tag} (${d.category}): ${d.lockPrompt || a.title}`;
-      })
-      .join("; ");
-    parts.push(`Character and world appearance: ${desc}.`);
-    parts.push(
-      "Use any attached reference images strictly for subject appearance consistency. Compose a brand-new camera angle and scene framing matching the shot description, never a turnaround sheet or split panel.",
-    );
-  }
-  if (seg.continuityLock.trim()) parts.push(`Lighting and continuity: ${seg.continuityLock.trim()}.`);
-  parts.push("Clean photographic film still, no text, no subtitles, no speech bubbles, no collage, no watermark.");
-  return parts.join(" ");
+function isInteriorLocationConflict(sceneText: string, locationLock: string): boolean {
+  const lowScene = sceneText.toLowerCase();
+  const lowLoc = locationLock.toLowerCase();
+  const sceneIsExt =
+    /\bext\.|exterior|outdoor|outside|street|trotoar|jalanan|pelataran|halaman|alun-alun|sunrise|fajar|gerbang luar|depan gerbang/i.test(
+      lowScene,
+    ) && !/\bint\.|inside|interior|di dalam|dalam gudang|lorong masuk/i.test(lowScene);
+  const locIsInt = /\binterior\b|inside|di dalam|ruang dalam|wooden crates|indoor/i.test(lowLoc);
+  return sceneIsExt && locIsInt;
 }
 
-// Select reference images for a segment frame without letting a wide location sheet override close-up framing.
-export function selectSegmentReferenceImages(project: NmcProject, segmentNode: CanvasNode): string[] {
+export function selectSegmentReferenceAssets(project: NmcProject, segmentNode: CanvasNode): CanvasNode[] {
   if (segmentNode.data.kind !== "segment") return [];
   const seg = segmentNode.data;
   const boundAssets = getBoundAssets(project, segmentNode.id);
   const isTightShot = seg.shotSize === "CU" || seg.shotSize === "ECU" || seg.shotSize === "MCU";
+  const sceneText = `${seg.timelineText} ${seg.visualPrompt || ""}`;
 
   const prioritized = [...boundAssets].sort((a, b) => {
     const catA = (a.data as AssetNodeData).category;
@@ -210,15 +186,85 @@ export function selectSegmentReferenceImages(project: NmcProject, segmentNode: C
     return rank(catA) - rank(catB);
   });
 
-  return prioritized
-    .filter((a) => {
-      const d = a.data as AssetNodeData;
-      if (!d.imageDataUrl) return false;
-      if (isTightShot && d.category === "location") return false;
-      return true;
-    })
-    .slice(0, 3)
-    .map((a) => (a.data as AssetNodeData).imageDataUrl as string);
+  const filtered = prioritized.filter((a) => {
+    const d = a.data as AssetNodeData;
+    if (!d.imageDataUrl) return false;
+    if (d.category === "location") {
+      if (isTightShot) return false;
+      if (isInteriorLocationConflict(sceneText, d.lockPrompt || a.title)) return false;
+    }
+    return true;
+  });
+
+  // Cap to 2 primary refs so FLUX.2 stays fast, faithful to faces/outfits, and free to compose new camera angles.
+  return filtered.slice(0, 2);
+}
+
+export function selectSegmentReferenceImages(project: NmcProject, segmentNode: CanvasNode): string[] {
+  return selectSegmentReferenceAssets(project, segmentNode).map(
+    (a) => (a.data as AssetNodeData).imageDataUrl as string,
+  );
+}
+
+function resolveTagsForImagePrompt(text: string, assets: CanvasNode[]): string {
+  let out = text;
+  for (const a of assets) {
+    if (a.data.kind !== "asset") continue;
+    const d = a.data as AssetNodeData;
+    const cleanName = a.title.split("(")[0].trim() || d.tag.replace(/^@/, "");
+    const escaped = d.tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp(escaped, "gi"), cleanName);
+  }
+  return out.replace(/@([A-Za-z0-9_]+)/g, "$1");
+}
+
+// Pure visual prompt for still-image models: resolves @Tags, excludes dialogue/timecodes, maps reference images explicitly.
+export function composeSegmentImagePrompt(project: NmcProject, segmentNode: CanvasNode): string {
+  if (segmentNode.data.kind !== "segment") return "";
+  const seg = segmentNode.data;
+  const script = getPrimaryScript(project);
+  const allAssets = project.nodes.filter((n) => n.kind === "asset");
+  const boundAssets = getBoundAssets(project, segmentNode.id);
+  const refAssets = selectSegmentReferenceAssets(project, segmentNode);
+
+  const rawAction = (seg.visualPrompt?.trim() || seg.timelineText)
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\[[^\]]+\]\s*/, "").trim())
+    .filter(Boolean)
+    .join(" ");
+  const actionText = resolveTagsForImagePrompt(rawAction, allAssets);
+
+  const parts: string[] = [
+    `Single full-bleed cinematic movie frame, ${FLOW_SHOT_LABELS[seg.shotSize]}, ${FLOW_ANGLE_LABELS[seg.cameraAngle]}.`,
+  ];
+  if (actionText) parts.push(`${actionText}.`);
+  if (script?.visualStyle) parts.push(`Visual style: ${script.visualStyle}.`);
+
+  if (refAssets.length > 0) {
+    const refMap = refAssets
+      .map((a, idx) => {
+        const d = a.data as AssetNodeData;
+        const name = a.title.split("(")[0].trim() || d.tag.replace(/^@/, "");
+        return `Reference image ${idx + 1} is ${name} (${d.lockPrompt || a.title})`;
+      })
+      .join(". ");
+    parts.push(`${refMap}. Keep exact face, age, hair, and clothing from the reference images while placing them naturally inside this new scene and camera angle.`);
+  } else if (boundAssets.length > 0) {
+    const desc = boundAssets
+      .map((a) => {
+        const d = a.data as AssetNodeData;
+        const name = a.title.split("(")[0].trim() || d.tag.replace(/^@/, "");
+        return `${name}: ${d.lockPrompt || a.title}`;
+      })
+      .join("; ");
+    parts.push(`Subjects: ${desc}.`);
+  }
+
+  if (seg.continuityLock.trim()) {
+    parts.push(`Continuity: ${resolveTagsForImagePrompt(seg.continuityLock.trim(), allAssets)}.`);
+  }
+  parts.push("Photorealistic single film still, no text, no subtitles, no split panels, no watermark.");
+  return parts.join(" ");
 }
 
 const FLOW_SHOT_LABELS: Record<SegmentNodeData["shotSize"], string> = {

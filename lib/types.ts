@@ -21,6 +21,7 @@ export interface ScriptBeat {
   cameraAngle?: CameraAngle;
   cameraMotion?: CameraMotion;
   visualPrompt?: string;
+  visibleAssets?: string[];
 }
 
 export interface MediaCandidate {

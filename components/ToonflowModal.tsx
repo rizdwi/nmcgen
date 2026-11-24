@@ -14,6 +14,7 @@ import { callAi } from "@/lib/storage";
 import {
   applyExtractedAssetsToProject,
   buildAssetExtractionPrompt,
+  buildAssetReferenceImagePrompt,
   buildEventGraphPrompt,
   buildScriptAgentPrompt,
   buildStoryboardAgentPrompt,
@@ -91,17 +92,6 @@ function patchScriptInProject(project: NmcProject, patch: Partial<ScriptNodeData
         : n,
     ),
   };
-}
-
-function assetGenerationPrompt(asset: AssetNodeData, visualStyle: string): string {
-  const style = visualStyle || "cinematic realistic film";
-  if (asset.category === "character") {
-    return `4-view character turnaround reference sheet on plain neutral studio background: head close-up, full-body front, 90-degree side profile, full-body back. No text, no watermark. Style: ${style}. Subject: ${asset.lockPrompt}`;
-  }
-  if (asset.category === "location") {
-    return `Master spatial view of an empty location with NO people and NO silhouettes. Clear foreground, midground, background, no text. Style: ${style}. Location: ${asset.lockPrompt}`;
-  }
-  return `2x2 prop turnaround sheet (front, side, back, detail) on clean studio background, no hands, no people, no text. Style: ${style}. Prop: ${asset.lockPrompt}`;
 }
 
 export default function ToonflowModal({
@@ -239,6 +229,7 @@ export default function ToonflowModal({
     if (!evs.length) throw new Error("Bangun Event Graph di tahap 02 terlebih dahulu sebelum ekstrak aset.");
     const built = buildAssetExtractionPrompt({
       projectName: curProj.name,
+      premise: curScript.premise,
       visualStyle: curScript.visualStyle,
       events: evs,
     });
@@ -258,7 +249,7 @@ export default function ToonflowModal({
     if (!node || node.data.kind !== "asset") return { next: curProj };
     const ad = node.data as AssetNodeData;
     const res = await callAi(imageProfile, "image", {
-      prompt: assetGenerationPrompt(ad, curScript.visualStyle),
+      prompt: buildAssetReferenceImagePrompt(ad, curScript.visualStyle),
       aspectRatio: "16:9",
     });
     if (res.discovered) onSyncDiscoveredModels(imageProfile.id, res.discovered);

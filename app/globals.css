@@ -907,6 +907,14 @@ video {
   overflow: hidden;
 }
 
+.modalDialog > form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .modalDialogWide {
   width: min(980px, 100%);
 }
@@ -919,6 +927,7 @@ video {
   padding: 8px 14px;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .toonflowTab {
@@ -1018,6 +1027,7 @@ video {
   padding: 14px 18px;
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .modalHeader h2 {
@@ -1028,6 +1038,8 @@ video {
 
 .modalBody {
   padding: 18px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -1043,6 +1055,7 @@ video {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .issueList {

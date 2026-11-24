@@ -154,7 +154,8 @@ export function buildEventGraphPrompt(params: {
       "4. Klimaks: keputusan aktif dan aksi penentu tokoh utama menghadapi sumber masalah.",
       "5. Ending / Resolusi: akibat langsung klimaks, tujuan awal tokoh terjawab tuntas, perubahan suasana/emosi nyata (dilarang menggantung asal dengan teriak lalu hitam).",
       "6. Setiap event WAJIB saling tersambung sebab-akibat (effect dari EV01 menjadi cause di EV02, dst) dan memiliki lokasi/ruang berbeda atau berkembang agar visual tidak statis di satu sudut.",
-      'Format JSON array: [{"code":"EV01","stage":"Intro / Perkenalan","title":"judul singkat event","summary":"kejadian konkret 1-2 kalimat","cause":"pemicu dari kondisi awal / event sebelumnya","effect":"akibat langsung yang memicu event berikutnya","conflict":"taruhan atau hambatan spesifik di event ini","emotion":"emosi dominan","location":"lokasi spesifik babak ini","characters":["@NamaTokoh"],"durationSec":8}]',
+      "7. Field characters WAJIB hanya berisi tokoh/makhluk yang FISIKNYA MUNCUL DI LAYAR pada babak tersebut (termasuk monster/antagonis saat muncul!). JANGAN masukkan tokoh yang hanya disebut namanya atau belum ditemukan.",
+      'Format JSON array: [{"code":"EV01","stage":"Intro / Perkenalan","title":"judul singkat event","summary":"kejadian konkret 1-2 kalimat","cause":"pemicu dari kondisi awal / event sebelumnya","effect":"akibat langsung yang memicu event berikutnya","conflict":"taruhan atau hambatan spesifik di event ini","emotion":"emosi dominan","location":"EXT. atau INT. lokasi spesifik babak ini","characters":["@NamaTokohYangTampil"],"durationSec":8}]',
       `Durasi tiap event: 6-${params.maxSegmentSec || 8} detik.`,
       `Gaya visual: ${params.visualStyle}`,
       `Premis: ${params.premise}`,
@@ -209,8 +210,21 @@ export interface ExtractedAssetSpec {
   lockPrompt: string;
 }
 
+// Shared reference image prompt builder (single full-body studio portrait avoids broken 4-view floating heads).
+export function buildAssetReferenceImagePrompt(asset: AssetNodeData, visualStyle: string): string {
+  const style = visualStyle || "cinematic realistic film";
+  if (asset.category === "character") {
+    return `Single full-body front-facing studio character reference portrait on plain solid neutral grey studio background. Full head-to-toe intact body standing naturally, clear face, exact age and clothing details. Style: ${style}. Character: ${asset.lockPrompt}. Single subject only, no split panels, no multiple views, no floating head, no cropped torso, no text, no watermark.`;
+  }
+  if (asset.category === "location") {
+    return `Wide architectural establishing photograph of an empty location with NO people and NO silhouettes. Clear foreground, midground, and background architecture. Style: ${style}. Location: ${asset.lockPrompt}. Single clean frame, no text, no watermark.`;
+  }
+  return `Clean single studio product photograph of one object centered on plain neutral dark grey background, no hands, no people, sharp detail. Style: ${style}. Object: ${asset.lockPrompt}. No split grid, no text, no watermark.`;
+}
+
 export function buildAssetExtractionPrompt(params: {
   projectName: string;
+  premise?: string;
   visualStyle: string;
   events: ToonflowEventNode[];
 }): { system: string; prompt: string } {
@@ -223,15 +237,21 @@ export function buildAssetExtractionPrompt(params: {
 
   return {
     system:
-      "Kamu adalah Asset Director Agent ala Toonflow. Ekstrak entitas karakter utama, antagonis/makhluk, lokasi kunci, dan prop penting dari Event Graph dengan deskripsi visual bahasa Inggris yang konsisten untuk AI image generation. Balas HANYA JSON array valid.",
+      "Kamu adalah Asset Director Agent ala Toonflow. Ekstrak karakter utama, antagonis/makhluk, lokasi kunci, dan prop penting dari Premis + Event Graph dengan deskripsi fisik bahasa Inggris yang akurat (umur tepat, etnis Indonesia jika cerita di Indonesia, pakaian khas warna kontras agar konsisten di tiap adegan). Balas HANYA JSON array valid.",
     prompt: [
-      `Analisis Event Graph episode "${params.projectName}" berikut lalu ekstrak 3 sampai 5 aset visual paling penting (prioritaskan karakter manusia utama, antagonis/monster jika ada, 1 lokasi utama, dan 1 prop kunci bila relevan).`,
-      'Format JSON array: [{"tag":"@Raka","title":"Raka (Fotografer)","category":"character","lockPrompt":"Detailed English physical appearance, age, hair, outfit colors, held gear, consistent face and silhouette"}]',
+      `Analisis Premis dan Event Graph episode "${params.projectName}" lalu ekstrak 3 sampai 5 aset visual paling penting.`,
+      'Format JSON array: [{"tag":"@Raka","title":"Raka (Fotografer)","category":"character","lockPrompt":"26-year-old Indonesian man, short damp black hair, dark olive utility jacket over black t-shirt, charcoal cargo pants, DSLR camera strap around neck"}]',
       'Nilai valid category: "character" | "location" | "prop".',
-      "Tag wajib memakai awalan @ tanpa spasi dan konsisten dengan nama tokoh di Event Graph.",
+      "Aturan wajib:",
+      "1. Ikuti umur, gender, pakaian, dan ciri khas yang disebut di Premis secara persis (misal anak 12 tahun HARUS ditulis 12-year-old Indonesian girl, JANGAN diubah jadi young adult!).",
+      "2. lockPrompt HANYA berisi ciri fisik/pakaian/arsitektur tetap (JANGAN masukkan kata lensa, lighting, atau ekspresi ekstrem agar cocok dipakai di segala kondisi cahaya adegan).",
+      "3. Tag wajib memakai awalan @ tanpa spasi dan konsisten dengan Event Graph.",
+      params.premise ? `Premis lengkap:\n${params.premise}` : "",
       `Gaya visual: ${params.visualStyle}`,
       `Event Graph:\n${eventLines}`,
-    ].join("\n"),
+    ]
+      .filter(Boolean)
+      .join("\n"),
   };
 }
 
@@ -291,8 +311,8 @@ export function buildScriptAgentPrompt(params: {
       'Format JSON array: [{"code":"SC01","eventCode":"EV01","stage":"Intro / Perkenalan","heading":"EXT. LOKASI SPESIFIK - WAKTU","action":"deskripsi aksi visual konkret dalam bahasa Indonesia (1-2 kalimat)","dialogue":"dialog lisan natural Indonesia maks 12 kata agar pas diucapkan dalam 7-8 detik","innerThought":"monolog batin atau subteks emosi tokoh","directorNote":"arahan tempo, pencahayaan, dan suasana suara","emotion":"emosi adegan"}]',
       "Aturan ketat:",
       "1. Setiap blok wajib melanjutkan sebab-akibat dari blok sebelumnya secara organik.",
-      "2. Dialog harus manusiawi, tajam, mendorong alur maju (bukan sekadar teriak tidak jelas), dan maks 12 kata per adegan.",
-      "3. Sebut tag karakter (@Nama) atau nama tokoh secara konsisten sesuai daftar aset.",
+      "2. Dialog harus natural seperti film bioskop Indonesia modern (dilarang klise kaku seperti 'Rasakan ini! Terang!' atau sekadar 'Tolong!'), singkat maks 12 kata agar pas 7-8 detik.",
+      "3. Sebut hanya tokoh yang benar-benar hadir di adegan tersebut secara konsisten.",
       `Batas durasi per segmen: ${params.maxSegmentSec || 8} detik. Gaya visual: ${params.visualStyle}.`,
       assetLines ? `Daftar Aset Visual:\n${assetLines}` : "",
       `Event Graph:\n${eventLines}`,
@@ -378,11 +398,11 @@ export function buildStoryboardAgentPrompt(params: {
       "Kamu adalah ProductionAgent / Storyboard Director ala Toonflow. Ubah skenario terstruktur menjadi shot storyboard sinematik dengan variasi sudut kamera nyata dan prompt visual bahasa Inggris bebas teks/dialog untuk AI gambar. Balas HANYA JSON array valid.",
     prompt: [
       `Susun TEPAT ${count} shot storyboard (E01..E0${count}) untuk episode "${params.projectName}".`,
-      'Format JSON array: [{"code":"E01","stage":"Intro / Perkenalan","durationSec":8,"summary":"aksi visual Indonesia konkret menyebut @Tag tokoh yang benar-benar muncul di adegan ini","dialogue":"dialog Indonesia singkat maks 12 kata","continuityLock":"kunci kontinuitas properti, kostum, arah pandang, dan cahaya dari shot sebelumnya","shotSize":"WS","cameraAngle":"Front","cameraMotion":"Push-In","visualPrompt":"vivid English cinematic film still describing exact shot framing, distinct setting angle, character pose and facial emotion, dramatic lighting, concrete physical props, zero text or subtitles"}]',
+      'Format JSON array: [{"code":"E01","stage":"Intro / Perkenalan","durationSec":8,"visibleAssets":["@Raka"],"summary":"aksi visual Indonesia konkret","dialogue":"dialog Indonesia natural maks 12 kata","continuityLock":"kunci kontinuitas properti, kostum, arah pandang, dan cahaya dari shot sebelumnya","shotSize":"WS","cameraAngle":"Front","cameraMotion":"Push-In","visualPrompt":"vivid English cinematic film still describing exact shot framing, exact exterior or interior location, character age/outfit/pose/emotion, physical props, and dramatic lighting WITHOUT any @ symbols or dialogue"}]',
       "Aturan sinematografi ketat:",
-      "1. Wajib bedakan shotSize, cameraAngle, dan ruang latar antar shot berturut-turut (JANGAN mengulang sudut gerbang/latar yang sama di semua shot!).",
-      "2. Pada summary dan visualPrompt, HANYA masukkan karakter/monster yang memang muncul di babak tersebut (misal jika monster belum muncul di Intro, JANGAN sebut monster di E01!).",
-      "3. visualPrompt wajib dalam bahasa Inggris sinematik, deskriptif secara visual, tanpa tanda kutip dialog, tanpa timecode.",
+      "1. Field visibleAssets WAJIB hanya berisi @Tag karakter/monster/lokasi/prop yang FISIKNYA TERLIHAT DI KAMERA pada shot ini. Jika tokoh A hanya memanggil nama tokoh B yang belum ketemu, JANGAN masukkan @B ke visibleAssets! Jika shot adalah EXTERIOR jalanan, JANGAN masukkan aset lokasi INTERIOR!",
+      "2. Wajib bedakan shotSize, cameraAngle, dan komposisi ruang antar shot berturut-turut (JANGAN mengulang sudut/latar yang sama di semua shot).",
+      "3. visualPrompt WAJIB bahasa Inggris murni TANPA simbol @ sama sekali (tulis deskripsi fisik tokohnya, bukan '@Raka'), tanpa tanda kutip dialog, tanpa timecode.",
       `Nilai valid: shotSize in [WS,MS,MCU,CU,ECU], cameraAngle in [Front,Side 90,Rear 3/4,High,Low], cameraMotion in [Static,Push-In,Pull-Out,Pan Right,Pan Left].`,
       `Rasio: ${params.aspectRatio}, durasi maks: ${params.maxSegmentSec} detik, gaya: ${params.visualStyle}.`,
       assetLines ? `Aset tersedia:\n${assetLines}` : "",
@@ -423,6 +443,12 @@ export function parseStoryboardBeats(
       ? (item.cameraMotion as CameraMotion)
       : fallbackMotions[idx % fallbackMotions.length];
 
+    const rawVisible = Array.isArray(item.visibleAssets) ? item.visibleAssets : [];
+    const visibleAssets = rawVisible
+      .map((v) => String(v || "").trim())
+      .filter(Boolean)
+      .map((v) => (v.startsWith("@") ? v : `@${v.replace(/\s+/g, "")}`));
+
     return {
       id: uid(),
       code: String(item.code || `E${String(idx + 1).padStart(2, "0")}`),
@@ -435,6 +461,7 @@ export function parseStoryboardBeats(
       cameraAngle,
       cameraMotion,
       visualPrompt: String(item.visualPrompt || ""),
+      visibleAssets: visibleAssets.length > 0 ? visibleAssets : undefined,
     };
   });
 
@@ -700,33 +727,44 @@ export function rebuildSegmentsFromBeats(
     };
     nodes.push(node);
 
-    // Selective asset wiring: match @tag or asset name mentioned in this beat/event.
+    // Selective asset wiring: trust explicit visibleAssets first, else event.characters + non-conflicting visual mentions (never grep spoken dialogue!).
     const ev = sd?.eventGraph?.[idx];
-    const corpus = [
-      beat.summary,
-      beat.dialogue,
-      beat.continuityLock || "",
-      beat.visualPrompt || "",
-      ev?.location || "",
-      ...(ev?.characters || []),
-    ]
-      .join(" ")
-      .toLowerCase();
+    const explicitTags = new Set(
+      (beat.visibleAssets && beat.visibleAssets.length > 0 ? beat.visibleAssets : ev?.characters || []).map((t) =>
+        t.toLowerCase().replace(/^@/, ""),
+      ),
+    );
+    const visualCorpus = `${beat.summary} ${beat.visualPrompt || ""} ${ev?.location || ""}`.toLowerCase();
+    const isExtScene =
+      /\bext\.|exterior|outdoor|outside|street|trotoar|jalanan|pelataran|halaman|alun-alun|sunrise|fajar|depan gerbang/i.test(
+        visualCorpus,
+      ) && !/\bint\.|inside|interior|di dalam|dalam gudang|lorong masuk/i.test(visualCorpus);
 
     const matched = assets.filter((a) => {
       if (a.data.kind !== "asset") return false;
       const d = a.data as AssetNodeData;
       const tag = d.tag.toLowerCase();
       const plain = tag.replace(/^@/, "");
+      if (d.category === "location" && isExtScene && /\binterior\b|inside|wooden crates|indoor/i.test(d.lockPrompt)) {
+        return false;
+      }
+      if (beat.visibleAssets && beat.visibleAssets.length > 0) {
+        return explicitTags.has(plain);
+      }
+      if (explicitTags.has(plain)) return true;
       const titleWord = a.title.toLowerCase().split(/[\s(]+/)[0] || "";
+      // For characters/monsters, rely on explicit presence (never wire a missing person just because someone mentions their scarf).
+      if (d.category === "character") {
+        if (explicitTags.size > 0) return false;
+        return (tag && visualCorpus.includes(tag)) || (plain.length >= 3 && visualCorpus.includes(plain));
+      }
       return (
-        (tag && corpus.includes(tag)) ||
-        (plain.length >= 3 && corpus.includes(plain)) ||
-        (titleWord.length >= 3 && corpus.includes(titleWord))
+        (tag && visualCorpus.includes(tag)) ||
+        (plain.length >= 3 && visualCorpus.includes(plain)) ||
+        (titleWord.length >= 3 && visualCorpus.includes(titleWord))
       );
     });
-    const toWire = matched.length > 0 ? matched : assets.filter((a) => a.data.kind === "asset" && a.data.category === "location");
-    for (const a of toWire) {
+    for (const a of matched) {
       edges.push({ id: uid(), source: a.id, target: node.id });
     }
     edges.push({ id: uid(), source: node.id, target: asmNode!.id });
