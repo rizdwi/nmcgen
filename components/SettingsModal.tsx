@@ -436,6 +436,9 @@ export default function SettingsModal({
             ) : (
               <>
                 <div className="nodeMetaRow">
+                  <span className="metaTag" data-tone={runtime.supabaseConnected ? "ok" : "warn"}>
+                    Supabase: {runtime.supabaseConnected ? "Terhubung" : "Mode Lokal"}
+                  </span>
                   <span className="metaTag" data-tone={runtime.mode === "local-hybrid" ? "ok" : "warn"}>
                     {runtime.mode === "local-hybrid" ? "Mode Lokal Penuh" : "Mode Web / Serverless"}
                   </span>

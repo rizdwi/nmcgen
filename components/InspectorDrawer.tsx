@@ -19,10 +19,17 @@ import type {
   SegmentNodeData,
   ShotSize,
 } from "@/lib/types";
-import { canConnect, NODE_META, uid } from "@/lib/presets";
+import {
+  canConnect,
+  matchVisualStylePreset,
+  NODE_META,
+  uid,
+  VISUAL_STYLE_PRESETS,
+} from "@/lib/presets";
 import { callAi, fileToDataUrl } from "@/lib/storage";
 import {
   buildSrt,
+  composeGoogleFlowPrompt,
   composeSegmentPrompt,
   estimateDialogueSeconds,
   getBoundAssets,
@@ -91,6 +98,54 @@ export default function InspectorDrawer({
 
   const patchData = <T extends CanvasNode["data"]>(patch: Partial<T>) => {
     onUpdateNode(node.id, (n) => ({ ...n, data: { ...n.data, ...patch } as CanvasNode["data"] }));
+  };
+
+  const handleAiGenerateScript = async (d: ScriptNodeData) => {
+    const seed = d.premise.trim() || project.name.trim();
+    if (!seed) {
+      setErrMsg("Isi premis singkat atau judul proyek terlebih dahulu sebelum generate naskah.");
+      return;
+    }
+    setBusyMsg("Menyusun naskah adegan via AI...");
+    setErrMsg("");
+    setOkMsg("");
+    try {
+      const modeHint =
+        d.maxSegmentSec === 8
+          ? "Target video Google Flow (Veo) dengan potongan klip 8 detik yang padat, sinematik, dan visual."
+          : `Target klip berdurasi maksimal ${d.maxSegmentSec} detik per segmen.`;
+      const prompt = [
+        "Tulis naskah adegan film pendek dalam bahasa Indonesia yang siap diproduksi menjadi storyboard & video AI.",
+        "Gunakan format skenario ringkas: Heading adegan (INT./EXT. LOKASI - WAKTU), deskripsi aksi visual dan pencahayaan yang konkret, serta dialog natural singkat per karakter.",
+        `Judul proyek: ${project.name}`,
+        `Premis: ${seed}`,
+        `Rasio video: ${d.aspectRatio}`,
+        `Gaya visual: ${d.visualStyle || "Sinematik realistis"}`,
+        modeHint,
+        "Balas langsung dengan teks naskah adegan tanpa pembuka atau komentar tambahan.",
+      ].join("\n");
+
+      const res = await callAi(textProfile, "text", {
+        system:
+          "Kamu adalah penulis skenario dan sutradara visual. Tulis naskah adegan ringkas, visual, spesifik pada aksi kamera dan dialog pendek yang realistis.",
+        prompt,
+      });
+      if (res.discovered) {
+        onSyncDiscoveredModels(textProfile.id, res.discovered);
+      }
+      if (!res.ok || !res.text?.trim()) {
+        setErrMsg(res.error || "Provider AI tidak mengembalikan naskah. Cek API key di Pengaturan.");
+        return;
+      }
+      patchData<ScriptNodeData>({ scriptText: res.text.trim() });
+      const modelNote = res.usedModel ? ` via ${res.usedModel}` : "";
+      const fbNote = res.fallbackNotes?.length ? ` (fallback dari: ${res.fallbackNotes.join(", ")})` : "";
+      setOkMsg(`Naskah adegan berhasil dibuat${modelNote}${fbNote}. Lanjutkan dengan klik "Pecah Beat via AI".`);
+    } catch (err) {
+      setErrMsg(`Gagal membuat naskah adegan: ${(err as Error).message}`);
+    } finally {
+      setBusyMsg("");
+    }
   };
 
   const handleAiBreakdownBeats = async (d: ScriptNodeData) => {
@@ -375,7 +430,7 @@ export default function InspectorDrawer({
                 </div>
                 <div className="fieldGroup">
                   <label className="fieldLabel" htmlFor="scr-maxseg">
-                    Batas Segmen (dtk)
+                    Batas Segmen / Engine
                   </label>
                   <select
                     id="scr-maxseg"
@@ -383,6 +438,7 @@ export default function InspectorDrawer({
                     value={d.maxSegmentSec}
                     onChange={(e) => patchData<ScriptNodeData>({ maxSegmentSec: Number(e.target.value) })}
                   >
+                    <option value={8}>8 detik (Google Flow / Veo)</option>
                     <option value={15}>15 detik (Seedance 2.0 / Omni)</option>
                     <option value={30}>30 detik (Seedance 2.5)</option>
                   </select>
@@ -390,15 +446,39 @@ export default function InspectorDrawer({
               </div>
 
               <div className="fieldGroup">
+                <label className="fieldLabel" htmlFor="scr-style-preset">
+                  Pilihan Gaya Visual Proyek
+                </label>
+                <select
+                  id="scr-style-preset"
+                  className="select"
+                  value={matchVisualStylePreset(d.visualStyle)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === "custom") return;
+                    const preset = VISUAL_STYLE_PRESETS.find((p) => p.id === val);
+                    if (preset) patchData<ScriptNodeData>({ visualStyle: preset.prompt });
+                  }}
+                >
+                  {VISUAL_STYLE_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </option>
+                  ))}
+                  <option value="custom">Kustom (Tulis Sendiri)</option>
+                </select>
+              </div>
+
+              <div className="fieldGroup">
                 <label className="fieldLabel" htmlFor="scr-style">
-                  Gaya Visual Proyek
+                  Detail Prompt Gaya Visual
                 </label>
                 <input
                   id="scr-style"
                   className="input"
                   value={d.visualStyle}
                   onChange={(e) => patchData<ScriptNodeData>({ visualStyle: e.target.value })}
-                  placeholder="Contoh: Film drama realistis, pencahayaan hangat"
+                  placeholder="Pilih preset di atas atau tulis gaya visual kustom..."
                 />
               </div>
 
@@ -416,16 +496,26 @@ export default function InspectorDrawer({
               </div>
 
               <div className="fieldGroup">
-                <label className="fieldLabel" htmlFor="scr-text">
-                  Naskah Adegan
-                </label>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <label className="fieldLabel" htmlFor="scr-text">
+                    Naskah Adegan
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btnPrimary btnSm"
+                    disabled={Boolean(busyMsg)}
+                    onClick={() => handleAiGenerateScript(d)}
+                  >
+                    Generate Naskah via AI
+                  </button>
+                </div>
                 <textarea
                   id="scr-text"
                   className="textarea"
-                  style={{ minHeight: 120 }}
+                  style={{ minHeight: 140 }}
                   value={d.scriptText}
                   onChange={(e) => patchData<ScriptNodeData>({ scriptText: e.target.value })}
-                  placeholder="Tulis kejadian visual & dialog..."
+                  placeholder="Klik 'Generate Naskah via AI' dari premis di atas, atau tulis langsung kejadian visual & dialog..."
                 />
               </div>
 
@@ -663,6 +753,7 @@ export default function InspectorDrawer({
           const boundAssets = getBoundAssets(project, node.id);
           const spokenEst = estimateDialogueSeconds(d.dialogue);
           const composed = composeSegmentPrompt(project, node);
+          const flowPrompt = composeGoogleFlowPrompt(project, node);
 
           return (
             <>
@@ -891,7 +982,42 @@ export default function InspectorDrawer({
 
                 <details>
                   <summary style={{ fontSize: 12, color: "var(--accent-text)", fontWeight: 600 }}>
-                    Lihat Prompt Gabungan (Siap Salin)
+                    Prompt Google Flow (Veo / Ingredients)
+                  </summary>
+                  <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                    <button
+                      type="button"
+                      className="btn btnSm"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(flowPrompt).then(
+                          () => setOkMsg(`Prompt Google Flow segmen ${d.code} disalin ke clipboard.`),
+                          () => setErrMsg("Browser menolak akses clipboard. Salin teks dari kotak di bawah."),
+                        );
+                      }}
+                    >
+                      Salin Prompt Google Flow
+                    </button>
+                    <pre
+                      className="mono"
+                      style={{
+                        margin: 0,
+                        padding: 10,
+                        borderRadius: "var(--radius-sm)",
+                        background: "var(--bg)",
+                        border: "1px solid var(--border)",
+                        fontSize: 11,
+                        whiteSpace: "pre-wrap",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      {flowPrompt}
+                    </pre>
+                  </div>
+                </details>
+
+                <details>
+                  <summary style={{ fontSize: 12, color: "var(--ink-muted)", fontWeight: 600 }}>
+                    Lihat Prompt Gabungan Standar
                   </summary>
                   <pre
                     className="mono"
@@ -1086,6 +1212,7 @@ export default function InspectorDrawer({
                   value={d.platform}
                   onChange={(e) => patchData<ExportNodeData>({ platform: e.target.value as PlatformPreset })}
                 >
+                  <option value="google-flow">Google Flow (Veo 8 dtk / Ingredients)</option>
                   <option value="youtube">YouTube (16:9 · -14 LUFS)</option>
                   <option value="tiktok">TikTok (9:16 · -14 LUFS)</option>
                   <option value="reels">Instagram Reels (9:16 · -14 LUFS)</option>

@@ -7,7 +7,7 @@ export type ShotSize = "WS" | "MS" | "MCU" | "CU" | "ECU";
 export type CameraAngle = "Front" | "Side 90" | "Rear 3/4" | "High" | "Low";
 export type CameraMotion = "Static" | "Push-In" | "Pull-Out" | "Pan Right" | "Pan Left";
 export type AudioRole = "vo" | "bgm" | "sfx" | "ambient";
-export type PlatformPreset = "tiktok" | "reels" | "youtube" | "custom";
+export type PlatformPreset = "tiktok" | "reels" | "youtube" | "google-flow" | "custom";
 
 export interface ScriptBeat {
   id: string;
@@ -160,6 +160,7 @@ export interface RuntimeStatus {
   localPyCapCut: boolean;
   ffmpegVersion?: string;
   defaultCapCutDir?: string;
+  supabaseConnected?: boolean;
   serverKeys: {
     gemini: boolean;
     geminiImage: boolean;

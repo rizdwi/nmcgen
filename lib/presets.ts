@@ -3,6 +3,7 @@ import type {
   CanvasNode,
   NmcProject,
   NodeKind,
+  PlatformPreset,
   ProviderProfile,
 } from "./types.ts";
 
@@ -15,6 +16,80 @@ export const DEFAULT_GEMINI_ID = "default-gemini";
 export const DEFAULT_OPENAI_ID = "default-openai";
 export const DEFAULT_ANTHROPIC_ID = "default-anthropic";
 export const DEFAULT_OLLAMA_ID = "default-ollama";
+
+export interface VisualStylePreset {
+  id: string;
+  label: string;
+  summary: string;
+  prompt: string;
+}
+
+export const VISUAL_STYLE_PRESETS: VisualStylePreset[] = [
+  {
+    id: "cinematic-35mm",
+    label: "Sinematik Realistis (Film 35mm)",
+    summary: "Live-action realistis, depth of field dangkal, cahaya hangat alami",
+    prompt:
+      "Cinematic realistic live-action 35mm film, natural skin texture, shallow depth of field, warm practical lighting, subtle film grain",
+  },
+  {
+    id: "anime-modern",
+    label: "Anime Modern (Cel-Shaded)",
+    summary: "Garis bersih, pencahayaan atmosferik, ekspresi dramatis",
+    prompt:
+      "Modern high-budget Japanese anime, crisp clean lineart, vibrant cel shading, atmospheric light rays, expressive character acting",
+  },
+  {
+    id: "stylized-3d",
+    label: "Animasi 3D Stylized",
+    summary: "Render 3D halus, tekstur kain & cahaya global lembut",
+    prompt:
+      "Stylized 3D animated film, soft global illumination, tactile fabric and surface shading, expressive eyes, balanced cinematic framing",
+  },
+  {
+    id: "neo-noir",
+    label: "Neo-Noir Malam",
+    summary: "Kontras tinggi, pantulan aspal basah, cahaya amber & bayangan dalam",
+    prompt:
+      "High-contrast neo-noir night cinematography, wet street reflections, moody amber and deep shadow key light, anamorphic lens",
+  },
+  {
+    id: "webtoon-comic",
+    label: "Komik / Webtoon Clean Line",
+    summary: "Ilustrasi digital bersih dengan tinta tegas & rim light",
+    prompt:
+      "Clean digital webtoon comic illustration, crisp ink outlines, editorial color blocks with focused rim lighting",
+  },
+  {
+    id: "documentary",
+    label: "Dokumenter Natural Handheld",
+    summary: "Cahaya natural tanpa polesan studio, nuansa kamera genggam",
+    prompt:
+      "Naturalistic documentary cinematography, authentic overcast daylight, unpolished real-world wardrobe, subtle handheld camera feel",
+  },
+  {
+    id: "retro-90s",
+    label: "Vintage Retro 90-an",
+    summary: "Palet analog Kodak, halation lembut, butiran film nostalgia",
+    prompt:
+      "1990s analog cinema aesthetic, Kodak Portra color palette, soft highlight halation, nostalgic warm film grain",
+  },
+  {
+    id: "watercolor-warm",
+    label: "Ilustrasi Cat Air Hangat",
+    summary: "Sapuan kuas organik, suasana buku cerita golden hour",
+    prompt:
+      "Hand-painted warm watercolor and gouache illustration, gentle organic brushwork, storybook golden-hour color palette",
+  },
+];
+
+export const DEFAULT_VISUAL_STYLE = VISUAL_STYLE_PRESETS[0].prompt;
+
+export function matchVisualStylePreset(styleText: string): string {
+  const clean = styleText.trim();
+  const found = VISUAL_STYLE_PRESETS.find((preset) => preset.prompt === clean);
+  return found ? found.id : "custom";
+}
 
 export const defaultProfiles = (): ProviderProfile[] => [
   {
@@ -78,7 +153,7 @@ export const NODE_META: Record<
     hasInput: false,
     hasOutput: true,
     allowedTargets: ["asset", "segment"],
-    hint: "Ide, rasio, dan daftar beat berdurasi",
+    hint: "Premis, gaya visual, naskah AI, dan beat",
   },
   asset: {
     label: "Aset & Lock",
@@ -96,7 +171,7 @@ export const NODE_META: Record<
     hasInput: true,
     hasOutput: true,
     allowedTargets: ["assembly"],
-    hint: "Prompt mandiri, kamera, media kandidat/adopsi",
+    hint: "Prompt mandiri, Google Flow, kamera, media",
   },
   audio: {
     label: "Audio / BGM",
@@ -117,13 +192,13 @@ export const NODE_META: Record<
     hint: "Validasi kontinuitas, SRT/ASS, loudness",
   },
   export: {
-    label: "Render & CapCut",
+    label: "Render & Flow",
     stage: "05 Ekspor",
     stageOrder: 5,
     hasInput: true,
     hasOutput: false,
     allowedTargets: [],
-    hint: "FFmpeg lokal, Draft CapCut, atau Bundle Web",
+    hint: "FFmpeg lokal, Draft CapCut, atau Google Flow",
   },
 };
 
@@ -150,8 +225,8 @@ export function createDefaultNode(kind: NodeKind, x: number, y: number, index = 
           premise: "",
           scriptText: "",
           aspectRatio: "16:9",
-          maxSegmentSec: 15,
-          visualStyle: "Film drama Indonesia kontemporer, pencahayaan hangat realistis",
+          maxSegmentSec: 8,
+          visualStyle: DEFAULT_VISUAL_STYLE,
           beats: [],
         },
       };
@@ -228,7 +303,7 @@ export function createDefaultNode(kind: NodeKind, x: number, y: number, index = 
         y,
         data: {
           kind: "export",
-          platform: "youtube",
+          platform: "google-flow",
           capcutDraftsDir: "",
         },
       };
@@ -247,218 +322,48 @@ export function createEmptyProject(name = "Proyek Baru"): NmcProject {
   };
 }
 
-export function createSampleProject(): NmcProject {
-  const nScript = "node_script_1";
-  const nRaka = "node_asset_raka";
-  const nDina = "node_asset_dina";
-  const nCafe = "node_asset_cafe";
-  const nSeg1 = "node_seg_1";
-  const nSeg2 = "node_seg_2";
-  const nAudio = "node_audio_1";
-  const nAsm = "node_asm_1";
-  const nExp = "node_exp_1";
+export function createStarterProject(
+  name = "Proyek Baru",
+  options: {
+    aspectRatio?: AspectRatio;
+    visualStyle?: string;
+    premise?: string;
+    maxSegmentSec?: number;
+    platform?: PlatformPreset;
+  } = {},
+): NmcProject {
+  const scriptNode = createDefaultNode("script", 40, 120, 1);
+  if (scriptNode.data.kind === "script") {
+    scriptNode.data = {
+      ...scriptNode.data,
+      aspectRatio: options.aspectRatio ?? "16:9",
+      visualStyle: options.visualStyle?.trim() || DEFAULT_VISUAL_STYLE,
+      premise: options.premise ?? "",
+      maxSegmentSec: options.maxSegmentSec ?? 8,
+    };
+  }
+  const asmNode = createDefaultNode("assembly", 780, 120, 1);
+  const expNode = createDefaultNode("export", 1120, 120, 1);
+  if (expNode.data.kind === "export") {
+    expNode.data = {
+      ...expNode.data,
+      platform:
+        options.platform ??
+        ((options.maxSegmentSec ?? 8) === 8
+          ? "google-flow"
+          : options.aspectRatio === "9:16"
+            ? "reels"
+            : "youtube"),
+    };
+  }
 
   return {
     schemaVersion: 1,
     id: uid(),
-    name: "Contoh: Raka & Dina di Warung Kopi",
+    name: name.trim() || "Proyek Baru",
     updatedAt: Date.now(),
-    viewport: { x: 36, y: 40, zoom: 0.78 },
-    nodes: [
-      {
-        id: nScript,
-        kind: "script",
-        title: "Naskah: Warung Kopi Malam",
-        x: 30,
-        y: 160,
-        data: {
-          kind: "script",
-          premise:
-            "Raka mau mengakui kesalahannya ke Dina di warung kopi malam, tapi akhirnya hanya menaruh kunci motor di meja lalu pergi.",
-          scriptText:
-            "INT. WARUNG KOPI - MALAM\nLampu gantung kuning hangat. Hujan rintik di balik jendela kaca kanan.\nRaka (kiri) dan Dina (kanan) duduk berhadapan. Raka menunduk melihat cangkirnya, lalu mengangkat wajah.\nRAKA: Din, soal kemarin... aku yang salah.\nDina diam menatap dingin lalu memalingkan wajah ke jendela.\nRaka meletakkan kunci motor perak di tengah meja, berdiri, dan berjalan keluar pintu kaca.",
-          aspectRatio: "16:9",
-          maxSegmentSec: 15,
-          visualStyle:
-            "Film drama Indonesia realistis, pencahayaan lampu gantung amber hangat, kontras malam hujan",
-          beats: [
-            {
-              id: "b1",
-              code: "E01",
-              durationSec: 4,
-              summary: "Raka & Dina duduk berhadapan dalam diam.",
-              dialogue: "",
-            },
-            {
-              id: "b2",
-              code: "E02",
-              durationSec: 4,
-              summary: "Raka mengangkat wajah dan mengakui kesalahannya.",
-              dialogue: "Din, soal kemarin... aku yang salah.",
-            },
-            {
-              id: "b3",
-              code: "E03",
-              durationSec: 3,
-              summary: "Dina diam dan memalingkan wajah ke jendela hujan.",
-              dialogue: "",
-            },
-            {
-              id: "b4",
-              code: "E04",
-              durationSec: 4,
-              summary: "Tangan Raka menaruh kunci motor perak di tengah meja.",
-              dialogue: "",
-            },
-            {
-              id: "b5",
-              code: "E05",
-              durationSec: 7,
-              summary: "Raka berdiri dan keluar lewat pintu kaca, Dina tetap duduk.",
-              dialogue: "",
-            },
-          ],
-        },
-      },
-      {
-        id: nRaka,
-        kind: "asset",
-        title: "Karakter @Raka",
-        x: 380,
-        y: 24,
-        data: {
-          kind: "asset",
-          tag: "@Raka",
-          category: "character",
-          lockPrompt:
-            "Pria Indonesia 24 tahun, rambut hitam pendek rapi, jaket denim indigo gelap, kaus abu tua, celana gelap.",
-        },
-      },
-      {
-        id: nDina,
-        kind: "asset",
-        title: "Karakter @Dina",
-        x: 380,
-        y: 214,
-        data: {
-          kind: "asset",
-          tag: "@Dina",
-          category: "character",
-          lockPrompt:
-            "Wanita Indonesia 23 tahun, rambut cokelat tua sebahu diselipkan di satu telinga, sweter rajut krem hangat.",
-        },
-      },
-      {
-        id: nCafe,
-        kind: "asset",
-        title: "Lokasi @WarungKopi",
-        x: 380,
-        y: 404,
-        data: {
-          kind: "asset",
-          tag: "@WarungKopi",
-          category: "location",
-          lockPrompt:
-            "Warung kopi malam kosong, meja kayu tengah dengan 2 cangkir keramik gelap, lampu gantung amber, jendela hujan kanan, pintu kaca belakang kanan.",
-        },
-      },
-      {
-        id: nSeg1,
-        kind: "segment",
-        title: "Segmen G01: Pengakuan",
-        x: 750,
-        y: 48,
-        data: {
-          kind: "segment",
-          code: "G01",
-          durationSec: 11,
-          shotSize: "MS",
-          cameraAngle: "Front",
-          cameraMotion: "Push-In",
-          timelineText:
-            "[0:00-0:04] Medium two-shot, Raka menunduk melihat cangkir.\n[0:04-0:08] Raka menatap Dina dan mengucapkan pengakuan.\n[0:08-0:11] Dina diam dan menoleh ke jendela kanan.",
-          dialogue: "Din, soal kemarin... aku yang salah.",
-          continuityLock:
-            "Raka di sisi kiri meja, Dina di sisi kanan, 2 cangkir kopi utuh, cahaya kuning dari atas.",
-          candidates: [],
-        },
-      },
-      {
-        id: nSeg2,
-        kind: "segment",
-        title: "Segmen G02: Kunci & Pergi",
-        x: 750,
-        y: 300,
-        data: {
-          kind: "segment",
-          code: "G02",
-          durationSec: 11,
-          shotSize: "CU",
-          cameraAngle: "Side 90",
-          cameraMotion: "Pull-Out",
-          timelineText:
-            "[0:00-0:04] Close-up meja kayu, tangan kanan Raka menaruh kunci motor perak di tengah meja.\n[0:04-0:11] Sudut samping medium-wide, Raka berdiri menuju pintu kaca belakang sementara Dina tetap duduk.",
-          dialogue: "",
-          continuityLock:
-            "Posisi awal tetap (Raka kiri, Dina kanan menoleh jendela). Kunci motor perak diletakkan di tengah meja.",
-          candidates: [],
-        },
-      },
-      {
-        id: nAudio,
-        kind: "audio",
-        title: "Ambient Hujan Malam",
-        x: 750,
-        y: 545,
-        data: {
-          kind: "audio",
-          role: "ambient",
-          volume: 0.12,
-          startSec: 0,
-          sourceMode: "ambient-rain",
-        },
-      },
-      {
-        id: nAsm,
-        kind: "assembly",
-        title: "Timeline & Validator",
-        x: 1130,
-        y: 190,
-        data: {
-          kind: "assembly",
-          fps: 24,
-          targetLufs: -14,
-          burnSubtitles: true,
-          fadeOutSec: 1.0,
-        },
-      },
-      {
-        id: nExp,
-        kind: "export",
-        title: "Render MP4 / CapCut",
-        x: 1470,
-        y: 190,
-        data: {
-          kind: "export",
-          platform: "youtube",
-          capcutDraftsDir: "",
-        },
-      },
-    ],
-    edges: [
-      { id: "e_s_raka", source: nScript, target: nRaka },
-      { id: "e_s_dina", source: nScript, target: nDina },
-      { id: "e_s_cafe", source: nScript, target: nCafe },
-      { id: "e_raka_s1", source: nRaka, target: nSeg1 },
-      { id: "e_dina_s1", source: nDina, target: nSeg1 },
-      { id: "e_cafe_s1", source: nCafe, target: nSeg1 },
-      { id: "e_raka_s2", source: nRaka, target: nSeg2 },
-      { id: "e_dina_s2", source: nDina, target: nSeg2 },
-      { id: "e_cafe_s2", source: nCafe, target: nSeg2 },
-      { id: "e_s1_asm", source: nSeg1, target: nAsm },
-      { id: "e_s2_asm", source: nSeg2, target: nAsm },
-      { id: "e_aud_asm", source: nAudio, target: nAsm },
-      { id: "e_asm_exp", source: nAsm, target: nExp },
-    ],
+    viewport: { x: 36, y: 40, zoom: 0.88 },
+    nodes: [scriptNode, asmNode, expNode],
+    edges: [{ id: uid(), source: asmNode.id, target: expNode.id }],
   };
 }

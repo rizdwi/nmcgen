@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import type { ExportNodeData, NmcProject, RenderReceipt, RuntimeStatus, ValidationReport } from "@/lib/types";
-import { buildOfflineBundleZip } from "@/lib/bundle";
+import { buildGoogleFlowGuide, buildOfflineBundleZip } from "@/lib/bundle";
 import { renderBrowserWebm } from "@/lib/browserExport";
 import { downloadBlob } from "@/lib/storage";
 import { CheckIcon, CloseIcon } from "./Icons";
@@ -30,6 +30,7 @@ export default function PipelineModal({
   const [result, setResult] = useState<RenderReceipt | null>(null);
   const [draftsDir, setDraftsDir] = useState("");
   const [draftName, setDraftName] = useState("");
+  const [flowNotice, setFlowNotice] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -171,6 +172,26 @@ export default function PipelineModal({
     }
   };
 
+  const handleCopyGoogleFlow = async () => {
+    setFlowNotice("");
+    const guide = buildGoogleFlowGuide(project);
+    try {
+      await navigator.clipboard.writeText(guide);
+      setFlowNotice("Semua prompt Google Flow (Ingredients + Veo) berhasil disalin ke clipboard.");
+    } catch {
+      setError("Browser menolak akses clipboard. Gunakan tombol Unduh google_flow_prompts.md.");
+    }
+  };
+
+  const handleDownloadGoogleFlow = () => {
+    const guide = buildGoogleFlowGuide(project);
+    const safeName =
+      (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
+      "-google-flow.md";
+    downloadBlob(new Blob([guide], { type: "text/markdown;charset=utf-8" }), safeName);
+    setFlowNotice(`File ${safeName} berhasil diunduh untuk ditempel di Google Flow.`);
+  };
+
   return (
     <div
       className="modalBackdrop"
@@ -304,6 +325,36 @@ export default function PipelineModal({
             <p style={{ margin: 0, fontSize: 12, color: "var(--ink-muted)" }}>
               pyCapCut otomatis merakit timeline, media, dan subtitle ke Draft CapCut. Export MP4 akhir dari CapCut tetap dilakukan manual di aplikasi CapCut Desktop.
             </p>
+          </div>
+
+          <div className="sectionBox">
+            <h3>Jalur C: Ekspor ke Google Flow (Veo &amp; Ingredients)</h3>
+            <p style={{ margin: 0, fontSize: 12, color: "var(--ink-muted)" }}>
+              Susun prompt siap tempel untuk Google Flow (mode Frames-to-Video atau Ingredients-to-Video per 8 detik)
+              beserta daftar aset kontinuitas proyek.
+            </p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              <button type="button" className="btn btnPrimary btnSm" onClick={() => void handleCopyGoogleFlow()}>
+                Salin Semua Prompt Google Flow
+              </button>
+              <button type="button" className="btn btnSm" onClick={handleDownloadGoogleFlow}>
+                Unduh google_flow_prompts.md
+              </button>
+              <a
+                href="https://labs.google/fx/tools/flow"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btnSm"
+                style={{ textDecoration: "none" }}
+              >
+                Buka Google Flow
+              </a>
+            </div>
+            {flowNotice ? (
+              <div className="alertBox" data-tone="ok" role="status">
+                {flowNotice}
+              </div>
+            ) : null}
           </div>
 
           {busy ? (

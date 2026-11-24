@@ -38,6 +38,7 @@ export function updateProjectMeta(
     premise?: string;
     aspectRatio?: AspectRatio;
     visualStyle?: string;
+    maxSegmentSec?: number;
   },
 ): NmcProject {
   const cleanName = patch.name.trim() || project.name || "Proyek Baru";
@@ -56,12 +57,19 @@ export function updateProjectMeta(
             premise: patch.premise !== undefined ? patch.premise : node.data.premise,
             aspectRatio: patch.aspectRatio ?? node.data.aspectRatio,
             visualStyle: patch.visualStyle !== undefined ? patch.visualStyle : node.data.visualStyle,
+            maxSegmentSec: patch.maxSegmentSec ?? node.data.maxSegmentSec,
           },
+        };
+      }
+      if (node.kind === "export" && node.data.kind === "export" && patch.maxSegmentSec === 8) {
+        return {
+          ...node,
+          data: { ...node.data, platform: "google-flow" },
         };
       }
       return node;
     });
-  } else if (patch.premise?.trim() || patch.visualStyle?.trim() || patch.aspectRatio) {
+  } else if (patch.premise?.trim() || patch.visualStyle?.trim() || patch.aspectRatio || patch.maxSegmentSec) {
     const created = createDefaultNode("script", 40, 80, 1);
     if (created.data.kind === "script") {
       created.data = {
@@ -69,6 +77,7 @@ export function updateProjectMeta(
         premise: patch.premise ?? "",
         aspectRatio: patch.aspectRatio ?? "16:9",
         visualStyle: patch.visualStyle ?? created.data.visualStyle,
+        maxSegmentSec: patch.maxSegmentSec ?? created.data.maxSegmentSec,
       };
     }
     nextNodes = [created, ...project.nodes];
@@ -149,6 +158,83 @@ export function composeSegmentPrompt(project: NmcProject, segmentNode: CanvasNod
   if (seg.dialogue.trim()) lines.push(`Spoken dialogue (preserve verbatim): "${seg.dialogue.trim()}"`);
   lines.push("No baked subtitles, no watermark, no random screen text.");
   return lines.join("\n");
+}
+
+const FLOW_SHOT_LABELS: Record<SegmentNodeData["shotSize"], string> = {
+  WS: "Wide establishing shot",
+  MS: "Medium shot",
+  MCU: "Medium close-up",
+  CU: "Close-up",
+  ECU: "Extreme close-up",
+};
+
+const FLOW_ANGLE_LABELS: Record<SegmentNodeData["cameraAngle"], string> = {
+  Front: "eye-level frontal angle",
+  "Side 90": "90-degree side profile angle",
+  "Rear 3/4": "rear three-quarter over-the-shoulder angle",
+  High: "high-angle perspective looking slightly down",
+  Low: "low-angle perspective looking slightly up",
+};
+
+const FLOW_MOTION_LABELS: Record<SegmentNodeData["cameraMotion"], string> = {
+  Static: "locked tripod camera, subtle natural subject motion",
+  "Push-In": "smooth slow dolly push-in",
+  "Pull-Out": "smooth slow dolly pull-out",
+  "Pan Right": "steady smooth pan right",
+  "Pan Left": "steady smooth pan left",
+};
+
+export function composeGoogleFlowPrompt(project: NmcProject, segmentNode: CanvasNode): string {
+  if (segmentNode.data.kind !== "segment") return "";
+  const seg = segmentNode.data;
+  const script = getPrimaryScript(project);
+  const boundAssets = getBoundAssets(project, segmentNode.id);
+  const adopted = getAdoptedMedia(seg);
+  const mode =
+    adopted?.kind === "image"
+      ? "Frames-to-Video (gunakan gambar frame teradopsi sebagai First Frame)"
+      : boundAssets.length > 0
+        ? "Ingredients-to-Video (unggah gambar aset terikat ke Ingredients)"
+        : "Text-to-Video";
+
+  const actionLine = seg.timelineText
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\[[^\]]+\]\s*/, "").trim())
+    .filter(Boolean)
+    .join(" ");
+
+  const parts: string[] = [
+    `[Google Flow | ${seg.code} | ${script?.aspectRatio ?? "16:9"} | ${seg.durationSec}s${seg.durationSec > 8 ? " -> potong 8s lalu Extend di Scenebuilder" : ""}]`,
+    `Mode Flow: ${mode}`,
+  ];
+
+  if (boundAssets.length > 0) {
+    const tags = boundAssets.map((a) => (a.data as AssetNodeData).tag).join(", ");
+    parts.push(`Ingredients: ${tags}`);
+  }
+
+  const promptSegments: string[] = [
+    `${FLOW_SHOT_LABELS[seg.shotSize]}, ${FLOW_ANGLE_LABELS[seg.cameraAngle]}, ${FLOW_MOTION_LABELS[seg.cameraMotion]}.`,
+  ];
+  if (script?.visualStyle) promptSegments.push(`Style: ${script.visualStyle}.`);
+  if (boundAssets.length > 0) {
+    const locks = boundAssets
+      .map((a) => {
+        const d = a.data as AssetNodeData;
+        return `${d.tag}: ${d.lockPrompt || a.title}`;
+      })
+      .join("; ");
+    promptSegments.push(`Subjects & setting: ${locks}.`);
+  }
+  if (seg.continuityLock.trim()) promptSegments.push(`Continuity: ${seg.continuityLock.trim()}.`);
+  if (actionLine) promptSegments.push(`Action: ${actionLine}`);
+  if (seg.dialogue.trim()) {
+    promptSegments.push(`Spoken Indonesian dialogue with synchronized lip motion: "${seg.dialogue.trim()}".`);
+  }
+  promptSegments.push("Clean cinematic frame, no on-screen subtitles, no watermarks.");
+
+  parts.push(`Prompt Veo / Flow:\n${promptSegments.join(" ")}`);
+  return parts.join("\n");
 }
 
 export function validateProject(project: NmcProject): ValidationReport {

@@ -4,6 +4,7 @@ import { resolutionFor } from "./presets.ts";
 import {
   buildAss,
   buildSrt,
+  composeGoogleFlowPrompt,
   composeSegmentPrompt,
   getAdoptedMedia,
   getConnectedAudio,
@@ -64,6 +65,49 @@ export function buildMarkdownSpec(project: NmcProject): string {
   lines.push("", "## 3. Segmen & Prompt Produksi");
   for (const s of segs) {
     lines.push("", `### ${s.title}`, "```text", composeSegmentPrompt(project, s), "```");
+  }
+
+  return lines.join("\n") + "\n";
+}
+
+export function buildGoogleFlowGuide(project: NmcProject): string {
+  const script = getPrimaryScript(project);
+  const assets = project.nodes.filter((n) => n.kind === "asset");
+  const segs = getOrderedSegments(project);
+
+  const lines: string[] = [
+    `# Google Flow Production Pack: ${project.name}`,
+    "",
+    `- URL Google Flow: https://labs.google/fx/tools/flow`,
+    `- Rasio: ${script?.aspectRatio ?? "16:9"}`,
+    `- Batas segmen: ${script?.maxSegmentSec ?? 8} detik`,
+    `- Gaya visual: ${script?.visualStyle || "-"}`,
+    "",
+    "## Langkah Kerja di Google Flow",
+    "1. Buka https://labs.google/fx/tools/flow lalu buat proyek baru.",
+    "2. Unggah gambar referensi aset di bawah ke tab Ingredients (karakter, lokasi, properti).",
+    "3. Untuk tiap segmen, tempel Prompt Veo / Flow di bawah (pilih Frames-to-Video bila sudah ada keyframe, atau Ingredients-to-Video).",
+    "4. Susun klip berurutan di Scenebuilder (gunakan Extend bila durasi segmen lebih dari 8 detik).",
+    "",
+    "## Ingredients (Aset Referensi)",
+  ];
+
+  if (assets.length === 0) {
+    lines.push("- Belum ada node Aset pada proyek ini.");
+  } else {
+    for (const a of assets) {
+      const d = a.data as AssetNodeData;
+      lines.push(`- **${d.tag}** (${d.category}): ${d.lockPrompt || "-"}`);
+    }
+  }
+
+  lines.push("", "## Daftar Prompt Segmen (Siap Tempel)");
+  if (segs.length === 0) {
+    lines.push("- Belum ada node Segmen terhubung.");
+  } else {
+    for (const s of segs) {
+      lines.push("", `### ${s.title}`, "```text", composeGoogleFlowPrompt(project, s), "```");
+    }
   }
 
   return lines.join("\n") + "\n";
@@ -180,6 +224,7 @@ export function buildOfflineBundleZip(
   entries.push(
     { name: "project.json", data: JSON.stringify(project, null, 2) },
     { name: "naskah.md", data: buildMarkdownSpec(project) },
+    { name: "google_flow_prompts.md", data: buildGoogleFlowGuide(project) },
     { name: "manifest.json", data: JSON.stringify(manifest, null, 2) },
     { name: "captions.srt", data: srt },
     { name: "subtitles.ass", data: ass },

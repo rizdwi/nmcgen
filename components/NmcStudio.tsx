@@ -13,12 +13,12 @@ import type {
 import {
   canConnect,
   createDefaultNode,
-  createEmptyProject,
-  createSampleProject,
+  createStarterProject,
   NODE_META,
   uid,
 } from "@/lib/presets";
 import { downloadBlob, loadSettings, projectDb, saveSettings } from "@/lib/storage";
+import { cloudDb, mergeProjects } from "@/lib/supabaseSync";
 import { autoArrangeNodes, updateProjectMeta, validateProject } from "@/lib/validator";
 import CanvasBoard from "./CanvasBoard";
 import InspectorDrawer from "./InspectorDrawer";
@@ -28,11 +28,11 @@ import SettingsModal from "./SettingsModal";
 import { CheckIcon, DashboardIcon, NodeKindIcon, PlusIcon, SlidersIcon } from "./Icons";
 
 const STAGE_ORDER: NodeKind[] = ["script", "asset", "segment", "audio", "assembly", "export"];
-const SEEDED_KEY = "nmcgen.seeded";
 
 export default function NmcStudio() {
   const [screen, setScreen] = useState<"dashboard" | "studio">("dashboard");
   const [loadingProjects, setLoadingProjects] = useState(true);
+  const [supabaseConnected, setSupabaseConnected] = useState(false);
   const [settings, setSettings] = useState<NmcSettings | null>(null);
   const [projects, setProjects] = useState<NmcProject[]>([]);
   const [project, setProject] = useState<NmcProject | null>(null);
@@ -80,31 +80,34 @@ export default function NmcStudio() {
 
     (async () => {
       try {
-        const list = await projectDb.list();
-        const alreadySeeded = typeof window !== "undefined" && localStorage.getItem(SEEDED_KEY) === "1";
-        if (list.length === 0 && !alreadySeeded) {
-          const sample = createSampleProject();
-          await projectDb.put(sample);
-          try {
-            localStorage.setItem(SEEDED_KEY, "1");
-          } catch {
-            // ignore storage quota errors
-          }
-          setProjects([sample]);
-          setProject(sample);
-          setSelectedNodeId(sample.nodes[0]?.id ?? null);
-        } else {
-          const sorted = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
-          const chosen = sorted.find((x) => x.id === loadedSettings.lastProjectId) ?? sorted[0] ?? null;
-          setProjects(sorted);
-          setProject(chosen);
-          setSelectedNodeId(chosen?.nodes[0]?.id ?? null);
+        const [localList, remoteRes] = await Promise.all([
+          projectDb.list().catch(() => [] as NmcProject[]),
+          cloudDb.list(),
+        ]);
+
+        setSupabaseConnected(remoteRes.connected);
+        if (remoteRes.error) {
+          setLoadError(`Sinkronisasi Supabase terkendala (${remoteRes.error}). Menampilkan data lokal.`);
         }
+
+        const merged = mergeProjects(localList, remoteRes.projects);
+        // Persist newer remote projects back to IndexedDB for offline resilience.
+        const localMap = new Map(localList.map((p) => [p.id, p]));
+        for (const remote of remoteRes.projects) {
+          const cur = localMap.get(remote.id);
+          if (!cur || remote.updatedAt > cur.updatedAt) {
+            void projectDb.put(remote).catch(() => {});
+          }
+        }
+
+        const chosen = merged.find((x) => x.id === loadedSettings.lastProjectId) ?? merged[0] ?? null;
+        setProjects(merged);
+        setProject(chosen);
+        setSelectedNodeId(chosen?.nodes[0]?.id ?? null);
       } catch (err) {
-        setLoadError(`Gagal memuat database lokal browser: ${(err as Error).message}`);
-        const fallback = createSampleProject();
-        setProjects([fallback]);
-        setProject(fallback);
+        setLoadError(`Gagal memuat daftar proyek: ${(err as Error).message}`);
+        setProjects([]);
+        setProject(null);
       } finally {
         setLoadingProjects(false);
       }
@@ -120,28 +123,41 @@ export default function NmcStudio() {
     });
   }, []);
 
-  const commitProject = useCallback((updater: (prev: NmcProject) => NmcProject) => {
-    setProject((prev) => {
-      if (!prev) return prev;
-      const next: NmcProject = { ...updater(prev), updatedAt: Date.now() };
-      setProjects((list) => {
-        const idx = list.findIndex((p) => p.id === next.id);
-        if (idx === -1) return [next, ...list];
-        const copy = [...list];
-        copy[idx] = next;
-        return copy;
-      });
-      setSaveState("saving");
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => {
-        projectDb
-          .put(next)
-          .then(() => setSaveState("saved"))
-          .catch(() => setSaveState("error"));
-      }, 260);
-      return next;
-    });
+  const persistProject = useCallback(async (next: NmcProject) => {
+    await projectDb.put(next);
+    const cloud = await cloudDb.put(next);
+    if (cloud.connected) {
+      setSupabaseConnected(true);
+      if (!cloud.ok) {
+        throw new Error(cloud.error || "Gagal menyimpan ke Supabase");
+      }
+    }
   }, []);
+
+  const commitProject = useCallback(
+    (updater: (prev: NmcProject) => NmcProject) => {
+      setProject((prev) => {
+        if (!prev) return prev;
+        const next: NmcProject = { ...updater(prev), updatedAt: Date.now() };
+        setProjects((list) => {
+          const idx = list.findIndex((p) => p.id === next.id);
+          if (idx === -1) return [next, ...list];
+          const copy = [...list];
+          copy[idx] = next;
+          return copy;
+        });
+        setSaveState("saving");
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        saveTimer.current = setTimeout(() => {
+          persistProject(next)
+            .then(() => setSaveState("saved"))
+            .catch(() => setSaveState("error"));
+        }, 320);
+        return next;
+      });
+    },
+    [persistProject],
+  );
 
   const report = useMemo(() => (project ? validateProject(project) : null), [project]);
 
@@ -163,13 +179,12 @@ export default function NmcStudio() {
       saveTimer.current = null;
       const latest = latestProjectRef.current;
       if (latest) {
-        projectDb
-          .put(latest)
+        persistProject(latest)
           .then(() => setSaveState("saved"))
           .catch(() => setSaveState("error"));
       }
     }
-  }, []);
+  }, [persistProject]);
 
   const handleOpenProjectFromDashboard = (id: string) => {
     const found = projects.find((p) => p.id === id);
@@ -201,19 +216,23 @@ export default function NmcStudio() {
 
   const handleNewProject = async () => {
     flushPendingSave();
-    const fresh = createEmptyProject(`Proyek ${projects.length + 1}`);
-    await projectDb.put(fresh).catch(() => {});
+    const fresh = createStarterProject(`Proyek ${projects.length + 1}`);
+    await persistProject(fresh).catch(() => {});
     setProjects((prev) => [fresh, ...prev]);
     setProject(fresh);
-    setSelectedNodeId(null);
+    setSelectedNodeId(fresh.nodes[0]?.id ?? null);
     setSelectedEdgeId(null);
     updateSettings((s) => ({ ...s, lastProjectId: fresh.id }));
   };
 
   const handleCreateProjectFromDashboard = async (meta: ProjectMetaDraft, openAfter: boolean) => {
-    const base = createEmptyProject(meta.name.trim() || `Proyek ${projects.length + 1}`);
-    const fresh = updateProjectMeta(base, meta);
-    await projectDb.put(fresh);
+    const fresh = createStarterProject(meta.name.trim() || `Proyek ${projects.length + 1}`, {
+      aspectRatio: meta.aspectRatio,
+      visualStyle: meta.visualStyle,
+      premise: meta.premise,
+      maxSegmentSec: meta.maxSegmentSec,
+    });
+    await persistProject(fresh);
     setProjects((prev) => [fresh, ...prev]);
     if (openAfter) {
       setProject(fresh);
@@ -224,17 +243,11 @@ export default function NmcStudio() {
     }
   };
 
-  const handleCreateSampleProject = async () => {
-    const sample = { ...createSampleProject(), id: uid(), updatedAt: Date.now() };
-    await projectDb.put(sample).catch(() => {});
-    setProjects((prev) => [sample, ...prev]);
-  };
-
   const handleUpdateProjectMeta = async (projectId: string, meta: ProjectMetaDraft) => {
     const target = projects.find((p) => p.id === projectId);
     if (!target) return;
     const updated = updateProjectMeta(target, meta);
-    await projectDb.put(updated);
+    await persistProject(updated);
     setProjects((prev) =>
       prev.map((p) => (p.id === projectId ? updated : p)).sort((a, b) => b.updatedAt - a.updatedAt),
     );
@@ -248,12 +261,10 @@ export default function NmcStudio() {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    try {
-      localStorage.setItem(SEEDED_KEY, "1");
-    } catch {
-      // ignore storage errors
-    }
-    await projectDb.del(projectId).catch(() => {});
+    await Promise.all([
+      projectDb.del(projectId).catch(() => {}),
+      cloudDb.del(projectId).catch(() => {}),
+    ]);
     const remaining = projects.filter((p) => p.id !== projectId);
     setProjects(remaining);
     if (project?.id === projectId) {
@@ -265,14 +276,14 @@ export default function NmcStudio() {
     }
   };
 
-  const handleLoadSampleIntoCurrent = () => {
-    const sample = createSampleProject();
+  const handleInitStarterIntoCurrent = () => {
+    const starter = createStarterProject(project?.name || "Proyek Baru");
     commitProject((prev) => ({
-      ...sample,
+      ...starter,
       id: prev.id,
-      name: prev.name === "Proyek Baru" ? sample.name : prev.name,
+      name: prev.name,
     }));
-    setSelectedNodeId(sample.nodes[0]?.id ?? null);
+    setSelectedNodeId(starter.nodes[0]?.id ?? null);
   };
 
   const handleExportJson = () => {
@@ -298,7 +309,7 @@ export default function NmcStudio() {
         updatedAt: Date.now(),
         viewport: parsed.viewport || { x: 40, y: 40, zoom: 0.85 },
       };
-      await projectDb.put(imported).catch(() => {});
+      await persistProject(imported).catch(() => {});
       setProjects((prev) => [imported, ...prev]);
       setProject(imported);
       setSelectedNodeId(imported.nodes[0]?.id ?? null);
@@ -491,9 +502,9 @@ export default function NmcStudio() {
           loading={loadingProjects}
           loadError={loadError}
           runtime={runtime}
+          supabaseConnected={supabaseConnected}
           onOpenProject={handleOpenProjectFromDashboard}
           onCreateProject={handleCreateProjectFromDashboard}
-          onCreateSampleProject={handleCreateSampleProject}
           onUpdateProjectMeta={handleUpdateProjectMeta}
           onDeleteProject={handleDeleteProjectById}
           onImportJson={handleImportJson}
@@ -624,7 +635,13 @@ export default function NmcStudio() {
 
         <div className="topRight">
           <span style={{ fontSize: 12, color: "var(--ink-muted)" }} aria-live="polite">
-            {saveState === "saving" ? "Menyimpan..." : saveState === "error" ? "Gagal simpan" : "Tersimpan"}
+            {saveState === "saving"
+              ? "Menyimpan..."
+              : saveState === "error"
+                ? "Gagal sinkron"
+                : supabaseConnected
+                  ? "Tersimpan (Cloud)"
+                  : "Tersimpan (Lokal)"}
           </span>
           <button
             type="button"
@@ -669,7 +686,7 @@ export default function NmcStudio() {
             onViewportChange={(viewport) => commitProject((prev) => ({ ...prev, viewport }))}
             onAddNode={handleAddNode}
             onAutoArrange={() => commitProject((prev) => ({ ...prev, nodes: autoArrangeNodes(prev) }))}
-            onLoadSample={handleLoadSampleIntoCurrent}
+            onInitStarter={handleInitStarterIntoCurrent}
           />
         ) : (
           <div className="listStage" role="region" aria-label="Daftar tahap produksi nmcGen">
@@ -687,8 +704,8 @@ export default function NmcStudio() {
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {project.nodes.length === 0 ? (
-                  <button type="button" className="btn btnPrimary btnSm" onClick={handleLoadSampleIntoCurrent}>
-                    Muat Contoh Raka &amp; Dina
+                  <button type="button" className="btn btnPrimary btnSm" onClick={handleInitStarterIntoCurrent}>
+                    Buat Alur Dasar
                   </button>
                 ) : null}
                 <button type="button" className="btn btnSm" onClick={handleBackToDashboard}>

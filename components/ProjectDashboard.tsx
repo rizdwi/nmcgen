@@ -1,7 +1,12 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AspectRatio, NmcProject, NodeKind, RuntimeStatus } from "@/lib/types";
-import { NODE_META } from "@/lib/presets";
+import {
+  DEFAULT_VISUAL_STYLE,
+  matchVisualStylePreset,
+  NODE_META,
+  VISUAL_STYLE_PRESETS,
+} from "@/lib/presets";
 import { getPrimaryScript, getProjectCover, validateProject } from "@/lib/validator";
 import { CloseIcon, EditIcon, PlusIcon, SlidersIcon, TrashIcon } from "./Icons";
 
@@ -10,6 +15,7 @@ const STAGE_KINDS: NodeKind[] = ["script", "asset", "segment", "audio", "assembl
 export interface ProjectMetaDraft {
   name: string;
   aspectRatio: AspectRatio;
+  maxSegmentSec: number;
   premise: string;
   visualStyle: string;
 }
@@ -19,9 +25,9 @@ interface ProjectDashboardProps {
   loading: boolean;
   loadError: string;
   runtime: RuntimeStatus | null;
+  supabaseConnected: boolean;
   onOpenProject: (projectId: string) => void;
   onCreateProject: (meta: ProjectMetaDraft, openAfter: boolean) => Promise<void>;
-  onCreateSampleProject: () => Promise<void>;
   onUpdateProjectMeta: (projectId: string, meta: ProjectMetaDraft) => Promise<void>;
   onDeleteProject: (projectId: string) => Promise<void>;
   onImportJson: (e: React.ChangeEvent<HTMLInputElement>) => void;
@@ -42,14 +48,21 @@ function formatUpdatedAt(ts: number): string {
   }
 }
 
+function styleLabelFor(styleText: string | undefined): string {
+  if (!styleText?.trim()) return "";
+  const id = matchVisualStylePreset(styleText);
+  const found = VISUAL_STYLE_PRESETS.find((p) => p.id === id);
+  return found ? found.label : "Gaya Kustom";
+}
+
 export default function ProjectDashboard({
   projects,
   loading,
   loadError,
   runtime,
+  supabaseConnected,
   onOpenProject,
   onCreateProject,
-  onCreateSampleProject,
   onUpdateProjectMeta,
   onDeleteProject,
   onImportJson,
@@ -61,8 +74,9 @@ export default function ProjectDashboard({
   const [draft, setDraft] = useState<ProjectMetaDraft>({
     name: "",
     aspectRatio: "16:9",
+    maxSegmentSec: 8,
     premise: "",
-    visualStyle: "Cinematic semi-realistic, lighting konsisten",
+    visualStyle: DEFAULT_VISUAL_STYLE,
   });
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -127,8 +141,9 @@ export default function ProjectDashboard({
     setDraft({
       name: `Proyek ${projects.length + 1}`,
       aspectRatio: "16:9",
+      maxSegmentSec: 8,
       premise: "",
-      visualStyle: "Cinematic semi-realistic, lighting konsisten",
+      visualStyle: DEFAULT_VISUAL_STYLE,
     });
   };
 
@@ -140,8 +155,9 @@ export default function ProjectDashboard({
     setDraft({
       name: project.name,
       aspectRatio: script?.aspectRatio ?? "16:9",
+      maxSegmentSec: script?.maxSegmentSec ?? 8,
       premise: script?.premise ?? "",
-      visualStyle: script?.visualStyle ?? "Cinematic semi-realistic, lighting konsisten",
+      visualStyle: script?.visualStyle ?? DEFAULT_VISUAL_STYLE,
     });
   };
 
@@ -184,6 +200,9 @@ export default function ProjectDashboard({
     }
   };
 
+  const selectedStylePresetId = matchVisualStylePreset(draft.visualStyle);
+  const selectedStyleObj = VISUAL_STYLE_PRESETS.find((p) => p.id === selectedStylePresetId);
+
   return (
     <div className="dashboardShell">
       <header className="topBar">
@@ -194,6 +213,13 @@ export default function ProjectDashboard({
             </span>
             <span className="brandTitle">nmcGen</span>
           </div>
+          <span
+            className="runtimePill"
+            data-ready={supabaseConnected}
+            title="Status sinkronisasi database cloud Supabase"
+          >
+            {supabaseConnected ? "Supabase Terhubung" : "Penyimpanan Lokal"}
+          </span>
           <span
             className="runtimePill"
             data-ready={runtime?.mode === "local-hybrid"}
@@ -247,12 +273,13 @@ export default function ProjectDashboard({
                 Dashboard Proyek
               </h1>
               <p className="dashboardSub">
-                Pilih kartu proyek untuk masuk ke kanvas node, ubah detail proyek, atau buat produksi baru.
+                Pilih kartu proyek untuk masuk ke kanvas node, ubah detail dan gaya visual proyek, atau mulai
+                produksi baru.
               </p>
             </div>
 
-            <div className="dashboardControls">
-              {projects.length > 0 ? (
+            {projects.length > 0 ? (
+              <div className="dashboardControls">
                 <div className="dashboardSearchWrap">
                   <label htmlFor="project-search" className="srOnly">
                     Cari proyek berdasarkan nama atau premis
@@ -266,15 +293,8 @@ export default function ProjectDashboard({
                     placeholder="Cari proyek..."
                   />
                 </div>
-              ) : null}
-              <button
-                type="button"
-                className="btn btnSm"
-                onClick={() => void onCreateSampleProject()}
-              >
-                + Contoh Raka &amp; Dina
-              </button>
-            </div>
+              </div>
+            ) : null}
           </section>
 
           {loadError ? (
@@ -287,28 +307,24 @@ export default function ProjectDashboard({
             <section className="dashboardEmpty" aria-live="polite">
               <div className="emptyCard">
                 <h2>Memuat daftar proyek...</h2>
-                <p>Membaca ruang kerja lokal nmcGen dari database browser.</p>
+                <p>Menyinkronkan proyek nmcGen dari database Supabase dan penyimpanan lokal.</p>
               </div>
             </section>
           ) : projects.length === 0 ? (
             <section className="dashboardEmpty" aria-label="Workspace kosong">
               <div className="emptyCard">
-                <h2>Belum ada proyek di workspace lokal</h2>
+                <h2>Belum ada proyek tersimpan</h2>
                 <p>
-                  Buat proyek kosong untuk menyusun alur node dari nol, atau muat contoh Raka &amp; Dina untuk
-                  mencoba alur lengkap.
+                  Buat proyek baru, pilih gaya visual serta target Google Flow atau FFmpeg/CapCut, lalu susun
+                  naskah adegan dengan AI di dalam kanvas node.
                 </p>
                 <div className="emptyActions">
                   <button type="button" className="btn btnPrimary" onClick={openCreateModal}>
                     <PlusIcon size={14} />
                     <span>Buat Proyek Baru</span>
                   </button>
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => void onCreateSampleProject()}
-                  >
-                    Muat Contoh Raka &amp; Dina
+                  <button type="button" className="btn" onClick={() => importRef.current?.click()}>
+                    Impor File JSON
                   </button>
                 </div>
               </div>
@@ -332,7 +348,8 @@ export default function ProjectDashboard({
             <>
               <div className="dashboardCountRow">
                 <span className="mono" style={{ fontSize: 12, color: "var(--ink-muted)" }}>
-                  Menampilkan {filtered.length} dari {projects.length} proyek lokal
+                  Menampilkan {filtered.length} dari {projects.length} proyek
+                  {supabaseConnected ? " (tersinkron ke Supabase)" : " (lokal)"}
                 </span>
               </div>
 
@@ -351,6 +368,8 @@ export default function ProjectDashboard({
                         ? "Siap"
                         : `${report.errors.length} err`;
                   const ratio = script?.aspectRatio ?? "16:9";
+                  const styleBadge = styleLabelFor(script?.visualStyle);
+                  const isFlowMode = (script?.maxSegmentSec ?? 15) === 8;
 
                   return (
                     <article key={project.id} className="projectCard">
@@ -404,11 +423,13 @@ export default function ProjectDashboard({
 
                         <p className="projectCardPremise">
                           {script?.premise?.trim() ||
-                            "Belum ada premis naskah. Buka kanvas untuk menyusun node."}
+                            "Belum ada premis naskah. Buka kanvas untuk generate naskah via AI."}
                         </p>
 
                         <div className="projectCardMeta">
                           <span className="metaTag mono">{ratio}</span>
+                          {isFlowMode ? <span className="metaTag">Google Flow (8s)</span> : null}
+                          {styleBadge ? <span className="metaTag">{styleBadge}</span> : null}
                           <span className="metaTag mono">{segmentCount} segmen</span>
                           <span className="metaTag mono">{report.totalDurationSec} dtk</span>
                         </div>
@@ -490,21 +511,21 @@ export default function ProjectDashboard({
                   </div>
                 ) : null}
 
-                <div className="fieldRow">
-                  <div className="fieldGroup">
-                    <label className="fieldLabel" htmlFor="dash-project-name">
-                      Nama Proyek
-                    </label>
-                    <input
-                      ref={nameInputRef}
-                      id="dash-project-name"
-                      className="input"
-                      value={draft.name}
-                      onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                      placeholder="Contoh: Episode 01 Warung Kopi"
-                    />
-                  </div>
+                <div className="fieldGroup">
+                  <label className="fieldLabel" htmlFor="dash-project-name">
+                    Nama Proyek
+                  </label>
+                  <input
+                    ref={nameInputRef}
+                    id="dash-project-name"
+                    className="input"
+                    value={draft.name}
+                    onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                    placeholder="Contoh: Film Pendek Hujan Malam"
+                  />
+                </div>
 
+                <div className="fieldRow">
                   <div className="fieldGroup">
                     <label className="fieldLabel" htmlFor="dash-project-ratio">
                       Rasio Aspek
@@ -521,31 +542,78 @@ export default function ProjectDashboard({
                       <option value="9:16">9:16 (Vertikal / Reels / TikTok)</option>
                     </select>
                   </div>
+
+                  <div className="fieldGroup">
+                    <label className="fieldLabel" htmlFor="dash-project-engine">
+                      Target Durasi / Pipeline
+                    </label>
+                    <select
+                      id="dash-project-engine"
+                      className="select"
+                      value={draft.maxSegmentSec}
+                      onChange={(e) =>
+                        setDraft((d) => ({ ...d, maxSegmentSec: Number(e.target.value) || 8 }))
+                      }
+                    >
+                      <option value={8}>Google Flow / Veo (8 dtk)</option>
+                      <option value={15}>Seedance / Omni (15 dtk)</option>
+                      <option value={30}>Segmen Panjang (30 dtk)</option>
+                    </select>
+                  </div>
                 </div>
 
                 <div className="fieldGroup">
-                  <label className="fieldLabel" htmlFor="dash-project-premise">
-                    Premis Singkat
+                  <label className="fieldLabel" htmlFor="dash-project-style-preset">
+                    Pilihan Gaya Visual Proyek
                   </label>
-                  <textarea
-                    id="dash-project-premise"
-                    className="textarea"
-                    value={draft.premise}
-                    onChange={(e) => setDraft((d) => ({ ...d, premise: e.target.value }))}
-                    placeholder="Tulis ringkasan cerita atau tujuan video proyek ini..."
-                  />
+                  <select
+                    id="dash-project-style-preset"
+                    className="select"
+                    value={selectedStylePresetId}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === "custom") return;
+                      const preset = VISUAL_STYLE_PRESETS.find((p) => p.id === val);
+                      if (preset) setDraft((d) => ({ ...d, visualStyle: preset.prompt }));
+                    }}
+                  >
+                    {VISUAL_STYLE_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                    <option value="custom">Kustom (Tulis Sendiri)</option>
+                  </select>
+                  {selectedStyleObj ? (
+                    <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
+                      {selectedStyleObj.summary}
+                    </span>
+                  ) : null}
                 </div>
 
                 <div className="fieldGroup">
                   <label className="fieldLabel" htmlFor="dash-project-style">
-                    Gaya Visual
+                    Detail Prompt Gaya Visual
                   </label>
                   <input
                     id="dash-project-style"
                     className="input"
                     value={draft.visualStyle}
                     onChange={(e) => setDraft((d) => ({ ...d, visualStyle: e.target.value }))}
-                    placeholder="Contoh: Cinematic warm lighting, semi-realistic"
+                    placeholder="Tulis gaya visual kustom atau pilih dari preset di atas..."
+                  />
+                </div>
+
+                <div className="fieldGroup">
+                  <label className="fieldLabel" htmlFor="dash-project-premise">
+                    Premis Singkat (Bahan Generate Naskah AI)
+                  </label>
+                  <textarea
+                    id="dash-project-premise"
+                    className="textarea"
+                    value={draft.premise}
+                    onChange={(e) => setDraft((d) => ({ ...d, premise: e.target.value }))}
+                    placeholder="Tulis ide cerita 1 sampai 2 kalimat, lalu generate naskah adegan lengkap di dalam kanvas..."
                   />
                 </div>
               </div>
@@ -605,8 +673,9 @@ export default function ProjectDashboard({
                 Anda akan menghapus proyek <strong>{deletingProject.name}</strong> ({deletingProject.nodes.length} node).
               </p>
               <div className="alertBox" data-tone="warn">
-                Proyek ini disimpan lokal di browser. Setelah dihapus, node dan media di dalamnya tidak dapat
-                dikembalikan kecuali Anda sudah mengekspor file JSON proyek.
+                Proyek ini akan dihapus permanen dari{" "}
+                {supabaseConnected ? "database Supabase dan penyimpanan lokal browser" : "penyimpanan lokal browser"}.
+                Ekspor JSON terlebih dahulu bila masih ingin menyimpan cadangan.
               </div>
             </div>
 

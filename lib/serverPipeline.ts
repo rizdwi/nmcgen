@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { AssemblyNodeData, AudioNodeData, NmcProject, RuntimeStatus, SegmentNodeData } from "./types";
 import { resolutionFor } from "./presets";
+import { getServerSupabaseConfig } from "./supabaseSync";
 import {
   buildAss,
   buildSrt,
@@ -96,6 +97,7 @@ export async function detectRuntime(): Promise<RuntimeStatus> {
     localPyCapCut,
     ffmpegVersion: ff.ok ? ff.stdout.split(/\r?\n/)[0]?.slice(0, 80) : undefined,
     defaultCapCutDir: isServerless ? undefined : defaultCapCutDraftsDir(),
+    supabaseConnected: Boolean(getServerSupabaseConfig()),
     serverKeys: {
       gemini: Boolean(process?.env?.GEMINI_API_KEY),
       geminiImage: Boolean(process?.env?.GEMINI_IMAGE_API_KEY || process?.env?.GEMINI_API_KEY),

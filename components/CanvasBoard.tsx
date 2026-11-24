@@ -18,7 +18,7 @@ interface CanvasBoardProps {
   onViewportChange: (vp: { x: number; y: number; zoom: number }) => void;
   onAddNode: (kind: NodeKind) => void;
   onAutoArrange: () => void;
-  onLoadSample: () => void;
+  onInitStarter: () => void;
 }
 
 const NODE_KINDS: NodeKind[] = ["script", "asset", "segment", "audio", "assembly", "export"];
@@ -44,7 +44,7 @@ export default function CanvasBoard({
   onViewportChange,
   onAddNode,
   onAutoArrange,
-  onLoadSample,
+  onInitStarter,
 }: CanvasBoardProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const [wiringFromId, setWiringFromId] = useState<string | null>(null);
@@ -341,12 +341,12 @@ export default function CanvasBoard({
           <div className="emptyCard">
             <h2>Kanvas proyek masih kosong</h2>
             <p>
-              Mulai dari contoh alur terhubung Raka &amp; Dina di Warung Kopi, atau tambahkan node Naskah pertama untuk
-              membangun pipeline dari awal.
+              Buat alur dasar (Naskah, Timeline, dan Ekspor) untuk mulai menulis atau generate naskah adegan
+              dengan AI, atau tambah satu node secara manual.
             </p>
             <div className="emptyActions">
-              <button type="button" className="btn btnPrimary" onClick={onLoadSample}>
-                Muat Contoh Raka &amp; Dina
+              <button type="button" className="btn btnPrimary" onClick={onInitStarter}>
+                Buat Alur Dasar
               </button>
               <button type="button" className="btn" onClick={() => onAddNode("script")}>
                 Tambah Node Naskah

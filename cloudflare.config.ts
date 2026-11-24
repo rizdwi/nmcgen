@@ -12,6 +12,8 @@ export default defineConfig({
     },
     env: {
       ASSETS: bindings.assets(),
+      SUPABASE_URL: bindings.secret(),
+      SUPABASE_PUBLISHABLE_KEY: bindings.secret(),
     },
   }),
 });
