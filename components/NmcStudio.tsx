@@ -42,6 +42,7 @@ export default function NmcStudio() {
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"canvas" | "list">("canvas");
   const [toonflowOpen, setToonflowOpen] = useState(false);
+  const [toonflowAutoStart, setToonflowAutoStart] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
@@ -228,7 +229,11 @@ export default function NmcStudio() {
     updateSettings((s) => ({ ...s, lastProjectId: fresh.id }));
   };
 
-  const handleCreateProjectFromDashboard = async (meta: ProjectMetaDraft, openAfter: boolean) => {
+  const handleCreateProjectFromDashboard = async (
+    meta: ProjectMetaDraft,
+    openAfter: boolean,
+    autoGenerate = false,
+  ) => {
     const fresh = createStarterProject(meta.name.trim() || `Proyek ${projects.length + 1}`, {
       aspectRatio: meta.aspectRatio,
       visualStyle: meta.visualStyle,
@@ -243,6 +248,10 @@ export default function NmcStudio() {
       setSelectedEdgeId(null);
       setScreen("studio");
       updateSettings((s) => ({ ...s, lastProjectId: fresh.id }));
+      if (autoGenerate) {
+        setToonflowAutoStart(true);
+        setToonflowOpen(true);
+      }
     }
   };
 
@@ -690,11 +699,14 @@ export default function NmcStudio() {
           </span>
           <button
             type="button"
-            className="btn btnSm"
-            onClick={() => setToonflowOpen(true)}
-            title="Buka seluruh pipeline 7 tahap Toonflow"
+            className="btn btnPrimary btnSm"
+            onClick={() => {
+              setToonflowAutoStart(false);
+              setToonflowOpen(true);
+            }}
+            title="Generate seluruh pipeline AI (Toonflow) sampai video jadi"
           >
-            <span>Toonflow</span>
+            <span>Generate AI (1 Klik)</span>
           </button>
           <button
             type="button"
@@ -870,10 +882,12 @@ export default function NmcStudio() {
 
       <ToonflowModal
         open={toonflowOpen}
+        autoStart={toonflowAutoStart}
         project={project}
         textProfile={textProfile}
         imageProfile={imageProfile}
         onReplaceProject={(next) => commitProject(() => next)}
+        onSaveReceipt={handleSaveReceipt}
         onSyncDiscoveredModels={(profileId, discovered) =>
           updateSettings((prev) => ({
             ...prev,
@@ -891,7 +905,10 @@ export default function NmcStudio() {
         }
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenPipeline={() => setPipelineOpen(true)}
-        onClose={() => setToonflowOpen(false)}
+        onClose={() => {
+          setToonflowAutoStart(false);
+          setToonflowOpen(false);
+        }}
       />
 
       <PipelineModal

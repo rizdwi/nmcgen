@@ -27,7 +27,7 @@ interface ProjectDashboardProps {
   runtime: RuntimeStatus | null;
   supabaseConnected: boolean;
   onOpenProject: (projectId: string) => void;
-  onCreateProject: (meta: ProjectMetaDraft, openAfter: boolean) => Promise<void>;
+  onCreateProject: (meta: ProjectMetaDraft, openAfter: boolean, autoGenerate?: boolean) => Promise<void>;
   onUpdateProjectMeta: (projectId: string, meta: ProjectMetaDraft) => Promise<void>;
   onDeleteProject: (projectId: string) => Promise<void>;
   onImportJson: (e: React.ChangeEvent<HTMLInputElement>) => void;
@@ -167,7 +167,7 @@ export default function ProjectDashboard({
     setFormError("");
   };
 
-  const handleSaveForm = async (openAfter: boolean) => {
+  const handleSaveForm = async (openAfter: boolean, autoGenerate = false) => {
     if (!draft.name.trim()) {
       setFormError("Nama proyek tidak boleh kosong.");
       nameInputRef.current?.focus();
@@ -177,7 +177,7 @@ export default function ProjectDashboard({
     setFormError("");
     try {
       if (formMode === "create") {
-        await onCreateProject(draft, openAfter);
+        await onCreateProject(draft, openAfter, autoGenerate);
       } else if (formMode === "edit" && editingId) {
         await onUpdateProjectMeta(editingId, draft);
       }
@@ -634,8 +634,21 @@ export default function ProjectDashboard({
                     >
                       Simpan di Dashboard
                     </button>
-                    <button type="submit" className="btn btnPrimary" disabled={submitting}>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={submitting}
+                      onClick={() => void handleSaveForm(true, false)}
+                    >
                       Buat &amp; Buka Kanvas
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btnPrimary"
+                      disabled={submitting}
+                      onClick={() => void handleSaveForm(true, true)}
+                    >
+                      Buat &amp; Generate Jadi (AI)
                     </button>
                   </>
                 ) : (

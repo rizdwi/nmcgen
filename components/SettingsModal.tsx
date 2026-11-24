@@ -490,34 +490,57 @@ export default function SettingsModal({
               <p style={{ margin: 0, color: "var(--ink-muted)" }}>Memeriksa FFmpeg, Python, dan pyCapCut...</p>
             ) : (
               <>
-                <div className="nodeMetaRow">
-                  <span
-                    className="metaTag"
-                    data-tone={runtime.workersAiBinding || runtime.serverKeys.cloudflareAi ? "ok" : "warn"}
-                  >
-                    Workers AI:{" "}
-                    {runtime.workersAiBinding
-                      ? "Binding Aktif"
-                      : runtime.serverKeys.cloudflareAi
-                        ? "REST Siap"
-                        : "Belum Aktif"}
-                  </span>
-                  <span className="metaTag" data-tone={runtime.supabaseConnected ? "ok" : "warn"}>
-                    Supabase: {runtime.supabaseConnected ? "Terhubung" : "Mode Lokal"}
-                  </span>
-                  <span className="metaTag" data-tone={runtime.mode === "local-hybrid" ? "ok" : "warn"}>
-                    {runtime.mode === "local-hybrid" ? "Mode Lokal Penuh" : "Mode Web / Serverless"}
-                  </span>
-                  <span className="metaTag" data-tone={runtime.localFfmpeg ? "ok" : "warn"}>
-                    FFmpeg: {runtime.localFfmpeg ? "Siap" : "Tidak tersedia"}
-                  </span>
-                  <span className="metaTag" data-tone={runtime.localPython ? "ok" : "warn"}>
-                    Python: {runtime.localPython ? "Siap" : "Tidak tersedia"}
-                  </span>
-                  <span className="metaTag" data-tone={runtime.localPyCapCut ? "ok" : "warn"}>
-                    pyCapCut: {runtime.localPyCapCut ? "Terpasang" : "Belum terpasang"}
-                  </span>
+                <div className="fieldGroup">
+                  <span className="fieldLabel">Layanan Web Aktif (Siap Langsung di Browser)</span>
+                  <div className="nodeMetaRow">
+                    <span
+                      className="metaTag"
+                      data-tone={runtime.workersAiBinding || runtime.serverKeys.cloudflareAi ? "ok" : "warn"}
+                    >
+                      Workers AI:{" "}
+                      {runtime.workersAiBinding
+                        ? "Binding Aktif"
+                        : runtime.serverKeys.cloudflareAi
+                          ? "REST Siap"
+                          : "Belum Aktif"}
+                    </span>
+                    <span className="metaTag" data-tone={runtime.supabaseConnected ? "ok" : "warn"}>
+                      Supabase: {runtime.supabaseConnected ? "Terhubung" : "Mode Lokal"}
+                    </span>
+                    <span className="metaTag" data-tone="ok">
+                      Render Video WebM: Siap (Browser)
+                    </span>
+                    <span className="metaTag" data-tone="ok">
+                      Ekspor ZIP &amp; Google Flow: Siap
+                    </span>
+                  </div>
                 </div>
+
+                <div className="fieldGroup">
+                  <span className="fieldLabel">Mesin Desktop Opsional (Hanya saat jalankan npm run dev di PC)</span>
+                  <div className="nodeMetaRow">
+                    <span className="metaTag" data-tone={runtime.mode === "local-hybrid" ? "ok" : undefined}>
+                      {runtime.mode === "local-hybrid" ? "Mode Lokal Penuh" : "Mode Web Cloud (Cloudflare)"}
+                    </span>
+                    <span className="metaTag" data-tone={runtime.localFfmpeg ? "ok" : undefined}>
+                      FFmpeg MP4: {runtime.localFfmpeg ? "Siap" : "Khusus PC Lokal"}
+                    </span>
+                    <span className="metaTag" data-tone={runtime.localPython ? "ok" : undefined}>
+                      Python: {runtime.localPython ? "Siap" : "Khusus PC Lokal"}
+                    </span>
+                    <span className="metaTag" data-tone={runtime.localPyCapCut ? "ok" : undefined}>
+                      pyCapCut: {runtime.localPyCapCut ? "Terpasang" : "Khusus PC Lokal"}
+                    </span>
+                  </div>
+                </div>
+
+                {runtime.isServerless ? (
+                  <p style={{ margin: 0, fontSize: 12, color: "var(--ink-muted)" }}>
+                    Pada versi web Cloudflare Workers, seluruh generate AI (teks, aset, storyboard, keyframe), render
+                    video WebM dengan subtitle &amp; audio ambient, serta unduh Bundle ZIP berjalan langsung di browser
+                    tanpa perlu FFmpeg/Python di server.
+                  </p>
+                ) : null}
                 {runtime.ffmpegVersion ? (
                   <p className="mono" style={{ margin: 0, fontSize: 11, color: "var(--ink-muted)" }}>
                     {runtime.ffmpegVersion}

@@ -260,19 +260,19 @@ export default function PipelineModal({
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               <button
                 type="button"
-                className="btn btnPrimary"
-                disabled={!report.ok || Boolean(busy) || !runtime?.localFfmpeg || !runtime?.localPython}
-                onClick={handleLocalFfmpeg}
-              >
-                Render MP4 Lokal (FFmpeg)
-              </button>
-              <button
-                type="button"
-                className="btn"
+                className={`btn ${!runtime?.localFfmpeg || !runtime?.localPython ? "btnPrimary" : ""}`}
                 disabled={!report.ok || Boolean(busy)}
                 onClick={handleBrowserWebm}
               >
-                Render WebM di Browser
+                Render WebM di Browser (Siap Web)
+              </button>
+              <button
+                type="button"
+                className={`btn ${runtime?.localFfmpeg && runtime?.localPython ? "btnPrimary" : ""}`}
+                disabled={!report.ok || Boolean(busy) || !runtime?.localFfmpeg || !runtime?.localPython}
+                onClick={handleLocalFfmpeg}
+              >
+                Render MP4 Lokal (FFmpeg PC)
               </button>
             </div>
             {runtime && (!runtime.localFfmpeg || !runtime.localPython) ? (

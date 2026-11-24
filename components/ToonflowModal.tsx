@@ -4,13 +4,16 @@ import type {
   AssetNodeData,
   NmcProject,
   ProviderProfile,
+  RenderReceipt,
   ScriptNodeData,
   SegmentNodeData,
   ToonflowEventNode,
   ToonflowSceneBlock,
 } from "@/lib/types";
+import { renderBrowserWebm } from "@/lib/browserExport";
+import { buildGoogleFlowGuide, buildOfflineBundleZip } from "@/lib/bundle";
 import { createDefaultNode, uid } from "@/lib/presets";
-import { callAi } from "@/lib/storage";
+import { callAi, downloadBlob } from "@/lib/storage";
 import {
   applyExtractedAssetsToProject,
   buildAssetExtractionPrompt,
@@ -56,10 +59,12 @@ interface QueueTask {
 
 interface ToonflowModalProps {
   open: boolean;
+  autoStart?: boolean;
   project: NmcProject;
   textProfile: ProviderProfile;
   imageProfile: ProviderProfile;
   onReplaceProject: (next: NmcProject) => void;
+  onSaveReceipt?: (receipt: RenderReceipt) => void;
   onSyncDiscoveredModels: (
     profileId: string,
     discovered: { textModels: string[]; imageModels: string[]; fetchedAt: number },
@@ -96,10 +101,12 @@ function patchScriptInProject(project: NmcProject, patch: Partial<ScriptNodeData
 
 export default function ToonflowModal({
   open,
+  autoStart,
   project,
   textProfile,
   imageProfile,
   onReplaceProject,
+  onSaveReceipt,
   onSyncDiscoveredModels,
   onOpenSettings,
   onOpenPipeline,
@@ -113,23 +120,43 @@ export default function ToonflowModal({
   const [autoGenAssets, setAutoGenAssets] = useState(true);
   const [autoGenFrames, setAutoGenFrames] = useState(true);
   const [autoSupervise, setAutoSupervise] = useState(true);
+  const [autoRenderVideo, setAutoRenderVideo] = useState(true);
+  const [finalVideo, setFinalVideo] = useState<RenderReceipt | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const projectRef = useRef<NmcProject>(project);
   const abortRef = useRef(false);
+  const autoStartedRef = useRef(false);
 
   useEffect(() => {
     projectRef.current = project;
   }, [project]);
 
   useEffect(() => {
-    if (!open) return;
+    setFinalVideo(null);
+    setTasks([]);
+    setOkMsg("");
+    setErrMsg("");
+  }, [project.id]);
+
+  useEffect(() => {
+    if (!open) {
+      autoStartedRef.current = false;
+      return;
+    }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !busyMsg) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, busyMsg, onClose]);
+
+  useEffect(() => {
+    if (open && autoStart && !autoStartedRef.current && !busyMsg) {
+      autoStartedRef.current = true;
+      void handleRunFullPipeline();
+    }
+  });
 
   if (!open) return null;
 
@@ -494,11 +521,12 @@ export default function ToonflowModal({
     }
   };
 
-  // Stage 7: Full 1-Click Toonflow Pipeline Orchestrator with real-time Task Queue Monitor
+  // Stage 7: Full 1-Click Toonflow Pipeline Orchestrator with real-time Task Queue Monitor + Auto Video Render
   const handleRunFullPipeline = async (feedbackNote?: string) => {
     abortRef.current = false;
     setErrMsg("");
     setOkMsg("");
+    setFinalVideo(null);
     setTab("autorun");
 
     const baseTasks: QueueTask[] = [
@@ -508,12 +536,15 @@ export default function ToonflowModal({
         ? [{ id: "t-assets-img", label: "03b. Batch Generate Gambar Referensi Aset", status: "pending" as const }]
         : []),
       { id: "t-script", label: "04. ScriptAgent: Adaptasi Naskah Terstruktur dari Event Graph", status: "pending" },
-      { id: "t-storyboard", label: "05. ProductionAgent: Susun Storyboard & Segmen Kanvas", status: "pending" },
+      { id: "t-storyboard", label: "05. ProductionAgent: Susun Storyboard, Audio & Segmen Kanvas", status: "pending" },
       ...(autoGenFrames
         ? [{ id: "t-frames", label: "05b. Batch Generate Keyframe Semua Segmen", status: "pending" as const }]
         : []),
       ...(autoSupervise
         ? [{ id: "t-supervise", label: "06. SupervisionAgent: Audit Alur Cerita & Kontinuitas", status: "pending" as const }]
+        : []),
+      ...(autoRenderVideo
+        ? [{ id: "t-render", label: "07. Auto-Render Video WebM Siap Tonton (Subtitle + Audio)", status: "pending" as const }]
         : []),
     ];
     setTasks(baseTasks);
@@ -581,10 +612,22 @@ export default function ToonflowModal({
         return { value: res.next, detail: `${scCount} adegan terstruktur via ${res.model || textProfile.name}` };
       });
 
-      // 5. ProductionAgent Storyboard & Segments
+      // 5. ProductionAgent Storyboard & Segments (+ ensure ambient audio wired to Timeline)
       cur = await runTask("t-storyboard", "ProductionAgent membangun segmen storyboard...", async () => {
         const res = await execStoryboardAndSegments(cur);
-        return { value: res.next, detail: `${res.count} segmen terhubung via ${res.model || textProfile.name}` };
+        let withAudio = res.next;
+        const asm = withAudio.nodes.find((n) => n.kind === "assembly");
+        const hasAudio = withAudio.nodes.some((n) => n.kind === "audio");
+        if (asm && !hasAudio) {
+          const audioNode = createDefaultNode("audio", 750, 36 + res.count * 248, 1);
+          withAudio = {
+            ...withAudio,
+            nodes: [...withAudio.nodes, audioNode],
+            edges: [...withAudio.edges, { id: uid(), source: audioNode.id, target: asm.id }],
+          };
+          commit(withAudio);
+        }
+        return { value: withAudio, detail: `${res.count} segmen + audio ambient terhubung via ${res.model || textProfile.name}` };
       });
 
       // 6. Batch keyframes
@@ -612,12 +655,75 @@ export default function ToonflowModal({
         });
       }
 
-      setOkMsg("Seluruh pipeline Toonflow selesai dijalankan. Periksa hasil pada kanvas atau tab Supervisor QC.");
+      // 8. Auto-render final WebM video right in browser so user immediately receives playable result
+      if (autoRenderVideo) {
+        await runTask("t-render", "Merender video hasil jadi (.webm) di browser...", async () => {
+          const out = await renderBrowserWebm(cur, (pct, label) => {
+            setBusyMsg(`${label} (${pct}%)`);
+            upsertTask("t-render", { detail: `${label} (${pct}%)` });
+          });
+          const url = URL.createObjectURL(out.blob);
+          const safeName =
+            (cur.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") + ".webm";
+          const receipt: RenderReceipt = {
+            engine: "browser-webm",
+            fileUrl: url,
+            fileName: safeName,
+            durationSec: out.durationSec,
+            sizeBytes: out.blob.size,
+            resolution: out.resolution,
+            verifiedAt: Date.now(),
+            note: "Video WebM selesai dirender otomatis di browser dengan subtitle & audio ambient.",
+          };
+          setFinalVideo(receipt);
+          onSaveReceipt?.(receipt);
+          return {
+            value: cur,
+            detail: `${safeName} (${out.resolution}, ${out.durationSec} dtk, ${(out.blob.size / (1024 * 1024)).toFixed(2)} MB)`,
+          };
+        });
+      }
+
+      setOkMsg("Seluruh pipeline AI selesai. Video hasil jadi siap diputar dan diunduh di bawah ini.");
     } catch (err) {
       setErrMsg((err as Error).message);
     } finally {
       setBusyMsg("");
     }
+  };
+
+  const handleDownloadFullZip = async () => {
+    setBusyMsg("Menyusun Paket Lengkap (.zip)...");
+    setErrMsg("");
+    try {
+      const [renderRes, capcutRes] = await Promise.all([
+        fetch("/scripts/render_ffmpeg.py"),
+        fetch("/scripts/build_capcut_draft.py"),
+      ]);
+      const renderPy = renderRes.ok ? await renderRes.text() : "";
+      const capcutPy = capcutRes.ok ? await capcutRes.text() : "";
+      const zipBytes = buildOfflineBundleZip(projectRef.current, renderPy, capcutPy);
+      const safeName =
+        (projectRef.current.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
+        "-bundle.zip";
+      const copy = new Uint8Array(zipBytes.byteLength);
+      copy.set(zipBytes);
+      downloadBlob(new Blob([copy], { type: "application/zip" }), safeName);
+      setOkMsg(`Paket lengkap ${safeName} berhasil diunduh.`);
+    } catch (err) {
+      setErrMsg(`Gagal membuat ZIP: ${(err as Error).message}`);
+    } finally {
+      setBusyMsg("");
+    }
+  };
+
+  const handleDownloadFlowMd = () => {
+    const guide = buildGoogleFlowGuide(projectRef.current);
+    const safeName =
+      (projectRef.current.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
+      "-google-flow.md";
+    downloadBlob(new Blob([guide], { type: "text/markdown;charset=utf-8" }), safeName);
+    setOkMsg(`Panduan Google Flow (${safeName}) berhasil diunduh.`);
   };
 
   const moveEvent = (idx: number, delta: -1 | 1) => {
@@ -821,6 +927,15 @@ export default function ToonflowModal({
                     />
                     <span>Jalankan SupervisionAgent di akhir</span>
                   </label>
+                  <label className="checkRow">
+                    <input
+                      type="checkbox"
+                      checked={autoRenderVideo}
+                      disabled={Boolean(busyMsg)}
+                      onChange={(e) => setAutoRenderVideo(e.target.checked)}
+                    />
+                    <span>Auto-render video WebM siap putar &amp; unduh (di browser)</span>
+                  </label>
                 </div>
 
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -830,7 +945,7 @@ export default function ToonflowModal({
                     disabled={Boolean(busyMsg)}
                     onClick={() => handleRunFullPipeline()}
                   >
-                    Jalankan Seluruh Pipeline Toonflow
+                    Generate Seluruh Pipeline AI (Terima Hasil Jadi)
                   </button>
                   <button
                     type="button"
@@ -842,6 +957,34 @@ export default function ToonflowModal({
                   </button>
                 </div>
               </div>
+
+              {finalVideo?.fileUrl ? (
+                <div className="sectionBox">
+                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                    <h3>Hasil Jadi Siap Tonton &amp; Unduh</h3>
+                    <span className="metaTag mono" data-tone="ok">
+                      {finalVideo.resolution} · {finalVideo.durationSec} dtk
+                    </span>
+                  </div>
+                  <video className="videoPlayer" controls src={finalVideo.fileUrl} />
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    <a
+                      className="btn btnPrimary"
+                      href={finalVideo.fileUrl}
+                      download={finalVideo.fileName || "nmcgen-episode.webm"}
+                      style={{ textDecoration: "none" }}
+                    >
+                      Unduh Video Jadi (.webm)
+                    </a>
+                    <button type="button" className="btn" disabled={Boolean(busyMsg)} onClick={() => void handleDownloadFullZip()}>
+                      Unduh Paket Lengkap (.zip)
+                    </button>
+                    <button type="button" className="btn" disabled={Boolean(busyMsg)} onClick={handleDownloadFlowMd}>
+                      Unduh Prompt Google Flow (.md)
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               <div className="sectionBox">
                 <h3>Monitor Antrean Tugas (Task Queue)</h3>
