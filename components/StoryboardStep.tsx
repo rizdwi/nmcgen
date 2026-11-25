@@ -7,6 +7,7 @@ import type {
   ShotSize,
   StoryboardData,
   StoryFrame,
+  StorySegment,
 } from "@/lib/types";
 import { uid } from "@/lib/presets";
 import { callAi, downloadBlob, fileToDataUrl } from "@/lib/storage";
@@ -18,11 +19,15 @@ import {
   buildStoryboardZip,
   buildSyncFrameVisualPrompt,
   CAMERA_ANGLE_META,
+  clampTargetPanels,
   composeStoryboardFramePrompt,
+  getSegmentFrames,
   getSelectedAssetImage,
   getSelectedFrameImage,
+  getStoryboardSegments,
   parseNextFrameResponse,
   parseQuickEditResponse,
+  reindexStoryboardFrames,
   SHOT_SIZE_META,
   VALID_CAMERA_ANGLES,
   VALID_SHOT_SIZES,
@@ -55,6 +60,8 @@ interface StoryboardStepProps {
   onOpenSettings: () => void;
 }
 
+const PANEL_COUNT_OPTIONS = [4, 5, 6, 7] as const;
+
 export default function StoryboardStep({
   project,
   sb,
@@ -64,10 +71,18 @@ export default function StoryboardStep({
   onSyncDiscoveredModels,
   onOpenSettings,
 }: StoryboardStepProps) {
+  const segments = useMemo(() => getStoryboardSegments(sb), [sb]);
+  const orderedFrames = useMemo(() => reindexStoryboardFrames(sb.frames, segments), [sb.frames, segments]);
+
   const [viewMode, setViewMode] = useState<"editor" | "cards">("editor");
-  const [activeFrameId, setActiveFrameId] = useState<string | null>(
-    sb.frames[sb.frames.length - 1]?.id ?? null,
-  );
+  const [previewLayout, setPreviewLayout] = useState<"strip" | "detail">("strip");
+  const [activeSegmentId, setActiveSegmentId] = useState<string>(() => segments[0]?.id ?? "");
+  const [activeFrameId, setActiveFrameId] = useState<string | null>(() => {
+    const firstSeg = segments[0];
+    if (!firstSeg) return null;
+    const list = getSegmentFrames(sb, firstSeg.id, 0);
+    return list[list.length - 1]?.id ?? null;
+  });
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -88,52 +103,99 @@ export default function StoryboardStep({
     return acc.length > 0 ? acc : sb.assets;
   }, [sb.assets]);
 
-  const activeFrame = useMemo(() => {
-    if (!sb.frames.length) return null;
-    return sb.frames.find((f) => f.id === activeFrameId) ?? sb.frames[sb.frames.length - 1];
-  }, [sb.frames, activeFrameId]);
-
-  const activeIdx = activeFrame ? sb.frames.findIndex((f) => f.id === activeFrame.id) : -1;
-  const previousFrame = activeIdx > 0 ? sb.frames[activeIdx - 1] : null;
-
+  // Keep activeSegmentId valid when segments list changes
   useEffect(() => {
-    if (sb.frames.length === 0) {
-      setActiveFrameId(null);
-    } else if (!activeFrameId || !sb.frames.some((f) => f.id === activeFrameId)) {
-      setActiveFrameId(sb.frames[sb.frames.length - 1].id);
+    if (segments.length > 0 && !segments.some((s) => s.id === activeSegmentId)) {
+      setActiveSegmentId(segments[0].id);
     }
-  }, [sb.frames, activeFrameId]);
+  }, [segments, activeSegmentId]);
 
-  // Lightbox keyboard navigation (Left / Right / Escape)
+  const activeSegmentIdx = Math.max(
+    0,
+    segments.findIndex((s) => s.id === activeSegmentId),
+  );
+  const activeSegment = segments[activeSegmentIdx] ?? segments[0];
+  const nextSegment = activeSegmentIdx + 1 < segments.length ? segments[activeSegmentIdx + 1] : null;
+
+  const activeSegmentFrames = useMemo(() => {
+    if (!activeSegment) return [];
+    return orderedFrames.filter((f) => f.segmentId === activeSegment.id);
+  }, [orderedFrames, activeSegment]);
+
+  const activeFrame = useMemo(() => {
+    if (!activeSegmentFrames.length) return null;
+    return (
+      activeSegmentFrames.find((f) => f.id === activeFrameId) ??
+      activeSegmentFrames[activeSegmentFrames.length - 1]
+    );
+  }, [activeSegmentFrames, activeFrameId]);
+
+  const activeSegPos = activeFrame ? activeSegmentFrames.findIndex((f) => f.id === activeFrame.id) : -1;
+  const activePanelNum = activeFrame ? activeFrame.panelNumber ?? activeSegPos + 1 : 0;
+  const activeGlobalIdx = activeFrame ? orderedFrames.findIndex((f) => f.id === activeFrame.id) : -1;
+  const previousFrame = activeGlobalIdx > 0 ? orderedFrames[activeGlobalIdx - 1] : null;
+
+  // Keep activeFrameId synced to active segment's frames
+  useEffect(() => {
+    if (activeSegmentFrames.length === 0) {
+      if (activeFrameId !== null) setActiveFrameId(null);
+    } else if (!activeFrameId || !activeSegmentFrames.some((f) => f.id === activeFrameId)) {
+      setActiveFrameId(activeSegmentFrames[activeSegmentFrames.length - 1].id);
+    }
+  }, [activeSegmentFrames, activeFrameId]);
+
+  // Lightbox keyboard navigation (Left / Right / Escape) across ALL panels
   useEffect(() => {
     if (lightboxIdx === null) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setLightboxIdx(null);
       if (e.key === "ArrowLeft") setLightboxIdx((i) => (i !== null && i > 0 ? i - 1 : i));
       if (e.key === "ArrowRight") {
-        setLightboxIdx((i) => (i !== null && i < sb.frames.length - 1 ? i + 1 : i));
+        setLightboxIdx((i) => (i !== null && i < orderedFrames.length - 1 ? i + 1 : i));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [lightboxIdx, sb.frames.length]);
+  }, [lightboxIdx, orderedFrames.length]);
 
-  const reindexFrames = (list: StoryFrame[]): StoryFrame[] =>
-    list.map((f, idx) => ({
-      ...f,
-      index: idx + 1,
-      sameLocationAsPrev: idx === 0 ? false : f.sameLocationAsPrev,
-    }));
-
-  const commitFrames = (nextFrames: StoryFrame[], extra?: Partial<StoryboardData>) => {
-    const clean = reindexFrames(nextFrames);
-    latestSbRef.current = { ...latestSbRef.current, frames: clean, ...extra };
-    onPatchSb({ frames: clean, ...extra });
+  const commitFrames = (
+    nextFrames: StoryFrame[],
+    extra?: Partial<StoryboardData>,
+    segmentsOverride?: StorySegment[],
+  ) => {
+    const segs = segmentsOverride ?? getStoryboardSegments(latestSbRef.current);
+    const clean = reindexStoryboardFrames(nextFrames, segs);
+    const nextSb: StoryboardData = {
+      ...latestSbRef.current,
+      segments: segs,
+      frames: clean,
+      ...extra,
+    };
+    latestSbRef.current = nextSb;
+    onPatchSb({ segments: segs, frames: clean, ...extra });
+    return clean;
   };
 
   const updateFrame = (frameId: string, patch: Partial<StoryFrame>) => {
     const next = latestSbRef.current.frames.map((f) => (f.id === frameId ? { ...f, ...patch } : f));
     commitFrames(next);
+  };
+
+  const handleSelectSegment = (segId: string) => {
+    setActiveSegmentId(segId);
+    const targetIdx = segments.findIndex((s) => s.id === segId);
+    const segFrames = getSegmentFrames(latestSbRef.current, segId, Math.max(0, targetIdx));
+    setActiveFrameId(segFrames[segFrames.length - 1]?.id ?? null);
+    setQuickEditText("");
+    setError("");
+  };
+
+  const handleChangeSegmentTargetPanels = (segId: string, targetPanels: number) => {
+    const segs = getStoryboardSegments(latestSbRef.current).map((s) =>
+      s.id === segId ? { ...s, targetPanels: clampTargetPanels(targetPanels) } : s,
+    );
+    latestSbRef.current = { ...latestSbRef.current, segments: segs };
+    onPatchSb({ segments: segs });
   };
 
   const toggleFrameAsset = (frame: StoryFrame, assetId: string) => {
@@ -142,7 +204,7 @@ export default function StoryboardStep({
     updateFrame(frame.id, { assetIds: nextIds });
   };
 
-  // Generate artwork for a single frame using FLUX.2 Klein 4B + <512x512 resized ACC references
+  // Generate artwork for a single panel using FLUX.2 Klein 4B + <512x512 resized ACC references
   const runGenerateFrameImage = async (targetFrame: StoryFrame, curSb: StoryboardData) => {
     let workingFrame = targetFrame;
     if (
@@ -167,8 +229,10 @@ export default function StoryboardStep({
       }
     }
 
-    const idx = curSb.frames.findIndex((f) => f.id === workingFrame.id);
-    const prev = idx > 0 ? curSb.frames[idx - 1] : null;
+    const segs = getStoryboardSegments(curSb);
+    const ordered = reindexStoryboardFrames(curSb.frames, segs);
+    const idx = ordered.findIndex((f) => f.id === workingFrame.id);
+    const prev = idx > 0 ? ordered[idx - 1] : null;
     const composed = composeStoryboardFramePrompt(workingFrame, curSb, prev);
 
     // Crucial Cloudflare FLUX.2 rule: all input_image_0..3 MUST be strictly < 512x512!
@@ -182,7 +246,7 @@ export default function StoryboardStep({
     });
     if (res.discovered) onSyncDiscoveredModels(imageProfile.id, res.discovered);
     if (!res.ok || !res.image) {
-      throw new Error(res.error || `Gagal generate gambar Frame ${targetFrame.index}.`);
+      throw new Error(res.error || `Gagal generate gambar Panel ${targetFrame.panelNumber ?? targetFrame.index}.`);
     }
 
     const candId = uid();
@@ -208,14 +272,16 @@ export default function StoryboardStep({
   };
 
   const handleGenerateActiveImage = async () => {
-    if (!activeFrame) return;
-    setBusy(`Menggambar Frame ${activeFrame.index} dengan FLUX.2 Klein 4B...`);
+    if (!activeFrame || !activeSegment) return;
+    setBusy(
+      `Menggambar Segmen ${activeSegment.index} · Panel ${activePanelNum} dengan FLUX.2 Klein 4B...`,
+    );
     setError("");
     setNotice("");
     try {
       const out = await runGenerateFrameImage(activeFrame, latestSbRef.current);
       setNotice(
-        `Gambar Frame ${activeFrame.index} selesai${out.model ? ` (${out.model.split("/").pop()})` : ""}${out.refCount ? ` · ${out.refCount} acuan aset ACC aktif` : ""}.`,
+        `Gambar Segmen ${activeSegment.index} · Panel ${activePanelNum} selesai${out.model ? ` (${out.model.split("/").pop()})` : ""}${out.refCount ? ` · ${out.refCount} acuan aset ACC aktif` : ""}.`,
       );
     } catch (err) {
       setError((err as Error).message);
@@ -224,15 +290,30 @@ export default function StoryboardStep({
     }
   };
 
-  // CORE FLOW: Continue -> Build Frame 1 or Frame N+1 sequentially from Script + ACC Assets + Previous Frames
-  const handleContinueNextFrame = async () => {
+  // CORE FLOW: Continue -> Build Panel 1..K (4-7 panels) sequentially for the active Segment
+  const handleContinueNextFrame = async (targetSegmentOverride?: StorySegment) => {
     const curSb = latestSbRef.current;
-    if (!curSb.scriptText.trim()) {
+    const segs = getStoryboardSegments(curSb);
+    const seg =
+      targetSegmentOverride ??
+      segs.find((s) => s.id === activeSegmentId) ??
+      segs[0];
+    if (!seg) return;
+
+    const segIdx = Math.max(0, segs.findIndex((s) => s.id === seg.id));
+    if (!curSb.scriptText.trim() && !seg.scriptContent.trim()) {
       setError("Naskah kosong. Kembali ke Tahap 1 untuk mengisi naskah terlebih dahulu.");
       return;
     }
-    const nextNum = curSb.frames.length + 1;
-    setBusy(`Menyusun rencana Frame ${nextNum} sesuai naskah & aset ACC...`);
+
+    const orderedBefore = reindexStoryboardFrames(curSb.frames, segs);
+    const segFramesBefore = orderedBefore.filter((f) => f.segmentId === seg.id);
+    const nextPanelNum = segFramesBefore.length + 1;
+    const targetPanels = clampTargetPanels(seg.targetPanels);
+
+    setBusy(
+      `Menyusun Panel ${nextPanelNum}/${targetPanels} untuk Segmen ${seg.index} ("${seg.title}")...`,
+    );
     setError("");
     setNotice("");
     try {
@@ -242,37 +323,72 @@ export default function StoryboardStep({
         visualStyle: curSb.visualStyle,
         aspectRatio: curSb.aspectRatio,
         approvedAssets,
-        previousFrames: curSb.frames,
-        userDirection: continueNote,
+        previousFrames: orderedBefore,
+        activeSegment: seg,
+        segmentFrames: segFramesBefore,
+        totalSegments: segs.length,
+        userDirection: targetSegmentOverride ? "" : continueNote,
       });
       const res = await callAi(textProfile, "text", built);
       if (res.discovered) onSyncDiscoveredModels(textProfile.id, res.discovered);
       if (!res.ok || !res.text) {
-        throw new Error(res.error || `Gagal menyusun Frame ${nextNum} dari AI.`);
+        throw new Error(res.error || `Gagal menyusun Panel ${nextPanelNum} dari AI.`);
       }
 
-      const { frame, storyFinished } = parseNextFrameResponse(res.text, approvedAssets, curSb.frames);
-      const nextFrames = [...curSb.frames, frame];
-      const nextSb: StoryboardData = { ...curSb, frames: nextFrames, storyFinished };
-      commitFrames(nextFrames, { storyFinished });
-      setActiveFrameId(frame.id);
+      const { frame, segmentFinished, storyFinished } = parseNextFrameResponse(
+        res.text,
+        approvedAssets,
+        orderedBefore,
+        { activeSegment: seg, segmentFrames: segFramesBefore },
+      );
+
+      const cleanFrames = commitFrames([...orderedBefore, frame], { storyFinished }, segs);
+      const indexedNewFrame = cleanFrames.find((f) => f.id === frame.id) ?? frame;
+      const nextSb: StoryboardData = {
+        ...latestSbRef.current,
+        segments: segs,
+        frames: cleanFrames,
+        storyFinished,
+      };
+      setActiveSegmentId(seg.id);
+      setActiveFrameId(indexedNewFrame.id);
       setContinueNote("");
       setViewMode("editor");
 
+      const followingSeg = segIdx + 1 < segs.length ? segs[segIdx + 1] : null;
+
       if (autoGenOnContinue) {
-        setBusy(`Frame ${frame.index} tersusun — sedang menggambar dengan FLUX.2 Klein 4B...`);
-        await runGenerateFrameImage(frame, nextSb);
-        setNotice(
-          storyFinished
-            ? `Frame ${frame.index} (akhir cerita di naskah) berhasil digambar! Buka tab Preview Kartu untuk melihat seluruh storyboard.`
-            : `Frame ${frame.index} berhasil dibuat & digambar. Cek hasilnya lalu klik Continue untuk Frame ${frame.index + 1}.`,
+        setBusy(
+          `Panel ${nextPanelNum}/${targetPanels} (Segmen ${seg.index}) tersusun — menggambar dengan FLUX.2 Klein 4B...`,
         );
+        await runGenerateFrameImage(indexedNewFrame, nextSb);
+        if (storyFinished) {
+          setNotice(
+            `Panel ${nextPanelNum}/${targetPanels} (penutup cerita) selesai digambar! Buka tab Preview Strip untuk melihat papan storyboard lengkap.`,
+          );
+        } else if (segmentFinished && followingSeg) {
+          setNotice(
+            `Segmen ${seg.index} selesai (${nextPanelNum}/${targetPanels} panel)! Klik "Lanjut Segmen ${followingSeg.index}" atau cek Preview Strip.`,
+          );
+        } else {
+          setNotice(
+            `Segmen ${seg.index} · Panel ${nextPanelNum}/${targetPanels} berhasil dibuat & digambar. Klik Continue untuk Panel ${nextPanelNum + 1}.`,
+          );
+        }
       } else {
-        setNotice(
-          storyFinished
-            ? `Draft Frame ${frame.index} (penutup naskah) siap. Periksa aset & aksinya, lalu klik Generate Gambar.`
-            : `Draft Frame ${frame.index} siap. Cek aksi & aset ACC yang terpilih, lalu klik Generate Gambar (4B).`,
-        );
+        if (storyFinished) {
+          setNotice(
+            `Draft Panel ${nextPanelNum}/${targetPanels} (penutup cerita) siap. Periksa aset ACC lalu klik Generate Gambar (4B).`,
+          );
+        } else if (segmentFinished && followingSeg) {
+          setNotice(
+            `Draft Panel ${nextPanelNum}/${targetPanels} (penutup Segmen ${seg.index}) siap. Generate gambarnya, lalu lanjut ke Segmen ${followingSeg.index}.`,
+          );
+        } else {
+          setNotice(
+            `Draft Segmen ${seg.index} · Panel ${nextPanelNum}/${targetPanels} siap. Cek aksi & aset ACC, lalu klik Generate Gambar (4B).`,
+          );
+        }
       }
     } catch (err) {
       setError((err as Error).message);
@@ -282,7 +398,7 @@ export default function StoryboardStep({
   };
 
   const handleQuickEditFrame = async () => {
-    if (!activeFrame) return;
+    if (!activeFrame || !activeSegment) return;
     const instruction = quickEditText.trim();
     const currentImg = getSelectedFrameImage(activeFrame);
     if (!instruction) {
@@ -290,17 +406,17 @@ export default function StoryboardStep({
       return;
     }
     if (!currentImg) {
-      setError("Generate gambar frame terlebih dahulu sebelum revisi gambar.");
+      setError("Generate gambar panel terlebih dahulu sebelum revisi gambar.");
       return;
     }
 
-    setBusy(`Merevisi gambar Frame ${activeFrame.index} dengan FLUX.2 Klein 4B...`);
+    setBusy(`Merevisi gambar Segmen ${activeSegment.index} · Panel ${activePanelNum} dengan FLUX.2 Klein 4B...`);
     setError("");
     setNotice("");
     try {
       const built = buildQuickEditPrompt({
         mode: "frame",
-        label: `Frame ${activeFrame.index}: ${activeFrame.title}`,
+        label: `Segmen ${activeSegment.index} Panel ${activePanelNum}: ${activeFrame.title}`,
         currentVisualDesc: activeFrame.visualPrompt || activeFrame.sceneSummary,
         instruction,
         visualStyle: sb.visualStyle,
@@ -309,7 +425,7 @@ export default function StoryboardStep({
       if (textRes.discovered) onSyncDiscoveredModels(textProfile.id, textRes.discovered);
       const parsed = parseQuickEditResponse(textRes.text || "", sb.visualStyle, instruction);
 
-      // image 0 = current frame (resized < 512x512), plus primary character ACC asset as image 1 if available
+      // image 0 = current panel (resized < 512x512), plus primary character ACC asset as image 1 if available
       const refsToResize = [currentImg];
       const primaryChar = activeFrame.assetIds
         .map((id) => sb.assets.find((a) => a.id === id))
@@ -325,7 +441,7 @@ export default function StoryboardStep({
       });
       if (imgRes.discovered) onSyncDiscoveredModels(imageProfile.id, imgRes.discovered);
       if (!imgRes.ok || !imgRes.image) {
-        throw new Error(imgRes.error || `Gagal merevisi Frame ${activeFrame.index}.`);
+        throw new Error(imgRes.error || `Gagal merevisi Panel ${activePanelNum}.`);
       }
 
       const candId = uid();
@@ -350,7 +466,7 @@ export default function StoryboardStep({
       });
       commitFrames(updated);
       setQuickEditText("");
-      setNotice(`Revisi Frame ${activeFrame.index} selesai.`);
+      setNotice(`Revisi Segmen ${activeSegment.index} · Panel ${activePanelNum} selesai.`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -377,7 +493,7 @@ export default function StoryboardStep({
           : f,
       );
       commitFrames(updated);
-      setNotice(`Gambar "${file.name}" dipasang ke Frame ${activeFrame.index}.`);
+      setNotice(`Gambar "${file.name}" dipasang ke Panel ${activePanelNum}.`);
       setError("");
     } catch (err) {
       setError((err as Error).message);
@@ -387,50 +503,61 @@ export default function StoryboardStep({
   };
 
   const handleAddBlankFrame = () => {
-    const idx = sb.frames.length + 1;
+    if (!activeSegment) return;
+    const panelNum = activeSegmentFrames.length + 1;
     const blank: StoryFrame = {
       id: uid(),
-      index: idx,
-      title: `Frame ${idx}`,
+      segmentId: activeSegment.id,
+      panelNumber: panelNum,
+      index: orderedFrames.length + 1,
+      title: `Panel ${panelNum}`,
       scriptExcerpt: "",
       sceneSummary: "",
       dialogue: "",
       shotSize: "MS",
       cameraAngle: "Front",
       assetIds: [],
-      sameLocationAsPrev: idx > 1,
+      sameLocationAsPrev: panelNum > 1,
       visualPrompt: "",
       approved: false,
       candidates: [],
     };
-    commitFrames([...sb.frames, blank]);
+    commitFrames([...orderedFrames, blank]);
     setActiveFrameId(blank.id);
     setViewMode("editor");
   };
 
   const handleMoveFrame = (frameId: string, delta: -1 | 1) => {
-    const idx = sb.frames.findIndex((f) => f.id === frameId);
+    if (!activeSegment) return;
+    const segList = [...activeSegmentFrames];
+    const idx = segList.findIndex((f) => f.id === frameId);
     const target = idx + delta;
-    if (idx === -1 || target < 0 || target >= sb.frames.length) return;
-    const copy = [...sb.frames];
-    const [moved] = copy.splice(idx, 1);
-    copy.splice(target, 0, moved);
-    commitFrames(copy);
+    if (idx === -1 || target < 0 || target >= segList.length) return;
+    const [moved] = segList.splice(idx, 1);
+    segList.splice(target, 0, moved);
+
+    // Rebuild combined list keeping other segments untouched
+    const otherFrames = orderedFrames.filter((f) => f.segmentId !== activeSegment.id);
+    commitFrames([...otherFrames, ...segList]);
   };
 
   const handleDeleteFrame = (frameId: string) => {
-    const idx = sb.frames.findIndex((f) => f.id === frameId);
-    const remaining = sb.frames.filter((f) => f.id !== frameId);
-    commitFrames(remaining, { storyFinished: false });
-    if (remaining.length === 0) {
+    const idxInSeg = activeSegmentFrames.findIndex((f) => f.id === frameId);
+    const remainingAll = orderedFrames.filter((f) => f.id !== frameId);
+    const remainingSeg = activeSegmentFrames.filter((f) => f.id !== frameId);
+    commitFrames(remainingAll, { storyFinished: false });
+    if (remainingSeg.length === 0) {
       setActiveFrameId(null);
     } else {
-      setActiveFrameId(remaining[Math.min(idx, remaining.length - 1)].id);
+      setActiveFrameId(remainingSeg[Math.min(idxInSeg, remainingSeg.length - 1)].id);
     }
   };
 
   const handleOptionalDownloadZip = () => {
-    const bytes = buildStoryboardZip({ ...project, storyboard: sb });
+    const bytes = buildStoryboardZip({
+      ...project,
+      storyboard: { ...sb, segments, frames: orderedFrames },
+    });
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
     const safeName =
@@ -444,20 +571,31 @@ export default function StoryboardStep({
     () => (activeFrame ? composeStoryboardFramePrompt(activeFrame, sb, previousFrame) : null),
     [activeFrame, sb, previousFrame],
   );
-  const approvedFrameCount = sb.frames.filter((f) => f.approved).length;
-  const lightboxFrame = lightboxIdx !== null ? sb.frames[lightboxIdx] ?? null : null;
+  const approvedFrameCount = orderedFrames.filter((f) => f.approved).length;
+  const totalTargetPanels = segments.reduce((sum, s) => sum + clampTargetPanels(s.targetPanels), 0);
+  const activeSegTarget = activeSegment ? clampTargetPanels(activeSegment.targetPanels) : 5;
+  const activeSegCompleted = activeSegmentFrames.length >= activeSegTarget;
+
+  const lightboxFrame = lightboxIdx !== null ? orderedFrames[lightboxIdx] ?? null : null;
+  const lightboxSegment = lightboxFrame
+    ? segments.find((s) => s.id === lightboxFrame.segmentId) ?? segments[0]
+    : null;
+  const lightboxSegFrames = lightboxSegment
+    ? orderedFrames.filter((f) => f.segmentId === lightboxSegment.id)
+    : [];
 
   return (
     <div className="stepContainer">
-      {/* Step header with instant Editor vs Card Preview switcher */}
+      {/* Step header with instant Editor vs Storyboard Strip Preview switcher */}
       <div className="stepIntroRow">
         <div>
-          <span className="stepKicker mono">TAHAP 3 DARI 3 · PER-FRAME + CONTINUE</span>
-          <h2 className="stepTitle">Storyboard Per-Frame</h2>
+          <span className="stepKicker mono">TAHAP 3 DARI 3 · STORYBOARD PER-SEGMEN (4–7 PANEL)</span>
+          <h2 className="stepTitle">Storyboard Per-Segmen</h2>
           <p className="stepSubtitle">
-            Bangun cerita satu frame demi satu frame dengan tombol <strong>Continue</strong> mengacu pada{" "}
-            <strong>{approvedAssets.length} aset ACC</strong>. Beralih ke <strong>Preview Kartu</strong> kapan saja
-            untuk melihat seluruh papan storyboard tanpa perlu unduh.
+            Pecah tiap segmen naskah menjadi <strong>4–7 panel berurutan</strong> lewat tombol{" "}
+            <strong>Continue</strong> (mengacu pada <strong>{approvedAssets.length} aset ACC</strong>) agar gerakan
+            mengalir mulus tanpa lompat-lompat. Buka <strong>Preview Strip</strong> untuk melihat papan storyboard
+            horizontal tiap segmen.
           </p>
         </div>
 
@@ -471,7 +609,7 @@ export default function StoryboardStep({
               onClick={() => setViewMode("editor")}
             >
               <FilmIcon size={14} />
-              <span>Editor Per-Frame</span>
+              <span>Editor Per-Panel</span>
             </button>
             <button
               type="button"
@@ -481,7 +619,7 @@ export default function StoryboardStep({
               onClick={() => setViewMode("cards")}
             >
               <GridIcon size={14} />
-              <span>Preview Kartu ({sb.frames.length})</span>
+              <span>Preview Strip ({orderedFrames.length})</span>
             </button>
           </div>
 
@@ -489,7 +627,7 @@ export default function StoryboardStep({
             {showScriptDrawer ? "Tutup Naskah" : "Lihat Naskah"}
           </button>
 
-          {sb.frames.length > 0 ? (
+          {orderedFrames.length > 0 ? (
             <button
               type="button"
               className="btn btnGhost btnSm"
@@ -524,7 +662,7 @@ export default function StoryboardStep({
       {showScriptDrawer ? (
         <section className="scriptPeekBox" aria-label="Naskah acuan">
           <div className="panelHead">
-            <h3>Naskah Acuan</h3>
+            <h3>Naskah Acuan ({segments.length} Segmen)</h3>
             <button type="button" className="btn btnGhost btnSm" onClick={() => onPatchSb({ step: "assets" })}>
               Cek Aset ACC ({approvedAssets.length})
             </button>
@@ -534,7 +672,7 @@ export default function StoryboardStep({
       ) : null}
 
       {/* =================================================================== */}
-      {/* VIEW MODE B: INSTANT PER-FRAME CARD PREVIEW (NO DOWNLOAD NEEDED!)   */}
+      {/* VIEW MODE B: PER-SEGMENT STORYBOARD STRIP PREVIEW (NO DOWNLOAD!)    */}
       {/* =================================================================== */}
       {viewMode === "cards" ? (
         <div className="cardsPreviewWrap">
@@ -562,133 +700,389 @@ export default function StoryboardStep({
             </details>
           ) : null}
 
-          {sb.frames.length === 0 ? (
-            <div className="emptyPanel">
-              <h3>Belum ada kartu frame</h3>
-              <p>Mulai buat Frame 1 dari naskah dan aset ACC Anda, lalu lanjutkan dengan tombol Continue.</p>
-              <button
-                type="button"
-                className="btn btnPrimary btnLg"
-                disabled={Boolean(busy)}
-                onClick={() => void handleContinueNextFrame()}
-              >
-                <SparklesIcon size={15} />
-                <span>Buat Frame 1 dari Naskah</span>
-              </button>
-            </div>
-          ) : (
-            <>
-              <div className="cardsPreviewMeta">
-                <span className="mono">
-                  {sb.frames.length} Frame · {approvedFrameCount} ACC · Rasio {sb.aspectRatio}
-                </span>
+          <div className="cardsPreviewMeta">
+            <span className="mono">
+              {segments.length} Segmen · {orderedFrames.length}/{totalTargetPanels} Panel · {approvedFrameCount} ACC ·
+              Rasio {sb.aspectRatio}
+            </span>
+
+            <div className="actionGroup">
+              <div className="segToggle" role="tablist" aria-label="Format preview storyboard">
                 <button
                   type="button"
-                  className="btn btnPrimary btnSm"
-                  disabled={Boolean(busy)}
-                  onClick={() => void handleContinueNextFrame()}
+                  role="tab"
+                  className="segBtn"
+                  aria-selected={previewLayout === "strip"}
+                  onClick={() => setPreviewLayout("strip")}
                 >
-                  <PlusIcon size={14} />
-                  <span>Continue → Frame {sb.frames.length + 1}</span>
+                  Strip Papan
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  className="segBtn"
+                  aria-selected={previewLayout === "detail"}
+                  onClick={() => setPreviewLayout("detail")}
+                >
+                  Kartu Detail
                 </button>
               </div>
+            </div>
+          </div>
 
-              <div className="storyboardCardGrid" data-ratio={sb.aspectRatio}>
-                {sb.frames.map((frame, idx) => {
-                  const img = getSelectedFrameImage(frame);
-                  const cast = frame.assetIds
-                    .map((id) => sb.assets.find((a) => a.id === id))
-                    .filter((a): a is NonNullable<typeof a> => Boolean(a));
+          {previewLayout === "strip" ? (
+            <div className="segmentStripStack">
+              {segments.map((seg) => {
+                const segFrames = orderedFrames.filter((f) => f.segmentId === seg.id);
+                const targetCount = clampTargetPanels(seg.targetPanels);
+                const slotCount = Math.max(targetCount, segFrames.length);
+                const isDone = segFrames.length >= targetCount;
 
-                  return (
-                    <article key={frame.id} className="sbPreviewCard" data-approved={frame.approved}>
-                      <button
-                        type="button"
-                        className="sbPreviewMediaBtn"
-                        data-ratio={sb.aspectRatio}
-                        onClick={() => setLightboxIdx(idx)}
-                        aria-label={`Perbesar Frame ${frame.index}: ${frame.title}`}
-                      >
-                        {img ? (
-                          <img src={img} alt={`Frame ${frame.index}: ${frame.title}`} className="sbPreviewImg" />
-                        ) : (
-                          <div className="sbPreviewEmpty">
-                            <span>Belum digambar</span>
-                          </div>
-                        )}
-                        <span className="sbFrameNumBadge mono">
-                          FRAME {String(frame.index).padStart(2, "0")}
+                return (
+                  <section key={seg.id} className="segmentStripBoard" aria-label={`Storyboard Segmen ${seg.index}`}>
+                    <div className="segmentStripHeader">
+                      <div className="metaInline">
+                        <span className="frameIndexPill mono">
+                          SEGMEN {String(seg.index).padStart(2, "0")}
                         </span>
-                        {frame.approved ? (
-                          <span className="sbAccBadge">
-                            <CheckIcon size={12} /> ACC
+                        <h3 className="segmentStripTitle">{seg.title}</h3>
+                        {seg.locationHint ? <span className="metaTag">{seg.locationHint}</span> : null}
+                      </div>
+
+                      <div className="actionGroup">
+                        <span className="statusBadge mono" data-tone={isDone ? "ok" : "warn"}>
+                          {isDone ? <CheckIcon size={11} /> : null}
+                          <span>
+                            {segFrames.length}/{targetCount} Panel
                           </span>
-                        ) : null}
-                      </button>
-
-                      <div className="sbPreviewBody">
-                        <div className="sbPreviewTitleRow">
-                          <h3>{frame.title || `Frame ${frame.index}`}</h3>
-                          <span className="metaTag mono">
-                            {frame.shotSize} · {frame.cameraAngle}
-                          </span>
-                        </div>
-
-                        {cast.length > 0 ? (
-                          <div className="sbCastMiniRow">
-                            {cast.map((a) => (
-                              <span key={a.id} className="sbCastMiniChip">
-                                {a.name}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
-
-                        <p className="sbPreviewSummary">
-                          {frame.sceneSummary || "Belum ada ringkasan aksi."}
-                        </p>
-
-                        {frame.dialogue.trim() ? (
-                          <blockquote className="sbPreviewDialogue">
-                            &ldquo;{frame.dialogue.trim()}&rdquo;
-                          </blockquote>
-                        ) : null}
-
-                        <div className="sbPreviewFooter">
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btnGhost btnSm"
+                          onClick={() => {
+                            handleSelectSegment(seg.id);
+                            setViewMode("editor");
+                          }}
+                        >
+                          Buka Editor
+                        </button>
+                        {segFrames.length < 7 ? (
                           <button
                             type="button"
-                            className="btn btnSm"
-                            onClick={() => setLightboxIdx(idx)}
+                            className="btn btnPrimary btnSm"
+                            disabled={Boolean(busy)}
+                            onClick={() => void handleContinueNextFrame(seg)}
                           >
-                            Perbesar
+                            <PlusIcon size={13} />
+                            <span>Panel {segFrames.length + 1}</span>
                           </button>
-                          <button
-                            type="button"
-                            className="btn btnGhost btnSm"
-                            onClick={() => {
-                              setActiveFrameId(frame.id);
-                              setViewMode("editor");
-                            }}
-                          >
-                            Edit Frame
-                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    {/* Signature horizontal Storyboard Sheet matching reference comic/film strip */}
+                    <div className="segmentStripSheetWrap">
+                      <div className="segmentStripSheet">
+                        <div
+                          className="segmentStripRow"
+                          data-ratio={sb.aspectRatio}
+                          style={{ ["--strip-cols" as string]: slotCount }}
+                        >
+                          {Array.from({ length: slotCount }, (_, slotIdx) => {
+                            const frame = segFrames[slotIdx];
+                            const pNum = slotIdx + 1;
+                            const isNextSlot = slotIdx === segFrames.length;
+
+                            if (!frame) {
+                              return (
+                                <div key={`ghost-${seg.id}-${pNum}`} className="stripPanelCell isGhost">
+                                  <button
+                                    type="button"
+                                    className="stripPanelGhostBtn"
+                                    data-ratio={sb.aspectRatio}
+                                    disabled={Boolean(busy) || !isNextSlot}
+                                    onClick={() => isNextSlot && void handleContinueNextFrame(seg)}
+                                    title={
+                                      isNextSlot
+                                        ? `Klik untuk membuat Panel ${pNum} Segmen ${seg.index}`
+                                        : `Buat Panel ${segFrames.length + 1} dulu`
+                                    }
+                                  >
+                                    {isNextSlot ? (
+                                      <>
+                                        <PlusIcon size={18} />
+                                        <span>Continue Panel {pNum}</span>
+                                      </>
+                                    ) : (
+                                      <span className="mono">Slot {pNum}</span>
+                                    )}
+                                  </button>
+                                  <div className="stripPanelCaption isMuted">PANEL {pNum}: —</div>
+                                </div>
+                              );
+                            }
+
+                            const img = getSelectedFrameImage(frame);
+                            const globalIdx = orderedFrames.findIndex((f) => f.id === frame.id);
+                            const captionTitle = (frame.title || `Panel ${pNum}`).toUpperCase();
+
+                            return (
+                              <div key={frame.id} className="stripPanelCell">
+                                <button
+                                  type="button"
+                                  className="stripPanelFrameBtn"
+                                  data-ratio={sb.aspectRatio}
+                                  onClick={() => setLightboxIdx(globalIdx)}
+                                  aria-label={`Perbesar Segmen ${seg.index} Panel ${pNum}: ${frame.title}`}
+                                >
+                                  {img ? (
+                                    <img
+                                      src={img}
+                                      alt={`Panel ${pNum}: ${frame.title}`}
+                                      className="stripPanelImg"
+                                    />
+                                  ) : (
+                                    <div className="stripPanelEmpty">
+                                      <span className="mono">Panel {pNum}</span>
+                                      <small>Belum digambar</small>
+                                    </div>
+                                  )}
+                                  <span className="stripPanelHoverTag mono">
+                                    {frame.shotSize} · {frame.cameraAngle}
+                                  </span>
+                                  {frame.approved ? (
+                                    <span className="stripPanelAccDot" title="Panel ACC">
+                                      <CheckIcon size={10} />
+                                    </span>
+                                  ) : null}
+                                </button>
+
+                                <div className="stripPanelCaption" title={frame.sceneSummary}>
+                                  PANEL {pNum}: {captionTitle}
+                                </div>
+
+                                {frame.dialogue.trim() ? (
+                                  <div className="stripPanelDialogue" title={frame.dialogue.trim()}>
+                                    &ldquo;{frame.dialogue.trim()}&rdquo;
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
-                    </article>
-                  );
-                })}
-              </div>
-            </>
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+          ) : (
+            /* Detailed Cards View grouped by Segment */
+            <div className="segmentStripStack">
+              {segments.map((seg) => {
+                const segFrames = orderedFrames.filter((f) => f.segmentId === seg.id);
+                const targetCount = clampTargetPanels(seg.targetPanels);
+                return (
+                  <section key={seg.id} className="segmentDetailGroup">
+                    <div className="segmentStripHeader" style={{ borderRadius: "var(--radius-md)", border: "1px solid var(--border)" }}>
+                      <div className="metaInline">
+                        <span className="frameIndexPill mono">SEGMEN {String(seg.index).padStart(2, "0")}</span>
+                        <h3 className="segmentStripTitle">{seg.title}</h3>
+                        {seg.locationHint ? <span className="metaTag">{seg.locationHint}</span> : null}
+                      </div>
+                      <span className="metaTag mono">
+                        {segFrames.length}/{targetCount} Panel
+                      </span>
+                    </div>
+
+                    {segFrames.length === 0 ? (
+                      <div className="emptyPanel" style={{ padding: "22px 16px" }}>
+                        <p>Belum ada panel di Segmen {seg.index}.</p>
+                        <button
+                          type="button"
+                          className="btn btnPrimary btnSm"
+                          disabled={Boolean(busy)}
+                          onClick={() => void handleContinueNextFrame(seg)}
+                        >
+                          <SparklesIcon size={14} />
+                          <span>Buat Panel 1 Segmen {seg.index}</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="storyboardCardGrid" data-ratio={sb.aspectRatio}>
+                        {segFrames.map((frame, pIdx) => {
+                          const pNum = frame.panelNumber ?? pIdx + 1;
+                          const img = getSelectedFrameImage(frame);
+                          const globalIdx = orderedFrames.findIndex((f) => f.id === frame.id);
+                          const cast = frame.assetIds
+                            .map((id) => sb.assets.find((a) => a.id === id))
+                            .filter((a): a is NonNullable<typeof a> => Boolean(a));
+
+                          return (
+                            <article key={frame.id} className="sbPreviewCard" data-approved={frame.approved}>
+                              <button
+                                type="button"
+                                className="sbPreviewMediaBtn"
+                                data-ratio={sb.aspectRatio}
+                                onClick={() => setLightboxIdx(globalIdx)}
+                                aria-label={`Perbesar Segmen ${seg.index} Panel ${pNum}: ${frame.title}`}
+                              >
+                                {img ? (
+                                  <img
+                                    src={img}
+                                    alt={`Panel ${pNum}: ${frame.title}`}
+                                    className="sbPreviewImg"
+                                  />
+                                ) : (
+                                  <div className="sbPreviewEmpty">
+                                    <span>Belum digambar</span>
+                                  </div>
+                                )}
+                                <span className="sbFrameNumBadge mono">
+                                  S{seg.index} · PANEL {pNum}
+                                </span>
+                                {frame.approved ? (
+                                  <span className="sbAccBadge">
+                                    <CheckIcon size={12} /> ACC
+                                  </span>
+                                ) : null}
+                              </button>
+
+                              <div className="sbPreviewBody">
+                                <div className="sbPreviewTitleRow">
+                                  <h3>{frame.title || `Panel ${pNum}`}</h3>
+                                  <span className="metaTag mono">
+                                    {frame.shotSize} · {frame.cameraAngle}
+                                  </span>
+                                </div>
+
+                                {cast.length > 0 ? (
+                                  <div className="sbCastMiniRow">
+                                    {cast.map((a) => (
+                                      <span key={a.id} className="sbCastMiniChip">
+                                        {a.name}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : null}
+
+                                <p className="sbPreviewSummary">
+                                  {frame.sceneSummary || "Belum ada ringkasan aksi."}
+                                </p>
+
+                                {frame.dialogue.trim() ? (
+                                  <blockquote className="sbPreviewDialogue">
+                                    &ldquo;{frame.dialogue.trim()}&rdquo;
+                                  </blockquote>
+                                ) : null}
+
+                                <div className="sbPreviewFooter">
+                                  <button
+                                    type="button"
+                                    className="btn btnSm"
+                                    onClick={() => setLightboxIdx(globalIdx)}
+                                  >
+                                    Perbesar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn btnGhost btnSm"
+                                    onClick={() => {
+                                      setActiveSegmentId(seg.id);
+                                      setActiveFrameId(frame.id);
+                                      setViewMode("editor");
+                                    }}
+                                  >
+                                    Edit Panel
+                                  </button>
+                                </div>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
+            </div>
           )}
         </div>
       ) : (
         /* =================================================================== */
-        /* VIEW MODE A: PER-FRAME EDITOR + CONTINUE                            */
+        /* VIEW MODE A: PER-SEGMENT, PER-PANEL EDITOR + CONTINUE               */
         /* =================================================================== */
         <>
-          {/* Filmstrip Bar */}
-          <div className="filmstripBar" role="region" aria-label="Urutan frame storyboard">
-            {sb.frames.map((frame) => {
+          {/* Segment Switcher Tabs Bar */}
+          <div className="segmentTabBar" role="tablist" aria-label="Pilih segmen naskah">
+            {segments.map((seg) => {
+              const segCount = orderedFrames.filter((f) => f.segmentId === seg.id).length;
+              const target = clampTargetPanels(seg.targetPanels);
+              const done = segCount >= target;
+              const selected = activeSegment?.id === seg.id;
+              return (
+                <button
+                  key={seg.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  className="segmentTabBtn"
+                  data-active={selected}
+                  data-done={done}
+                  onClick={() => handleSelectSegment(seg.id)}
+                >
+                  <div className="segmentTabTop">
+                    <span className="mono segmentTabNum">SEGMEN {String(seg.index).padStart(2, "0")}</span>
+                    <span className="mono segmentTabCount" data-done={done}>
+                      {done ? <CheckIcon size={10} /> : null}
+                      {segCount}/{target}
+                    </span>
+                  </div>
+                  <span className="segmentTabTitle">{seg.title}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Active Segment Script Focus Banner + Target Panel Control */}
+          {activeSegment ? (
+            <div className="activeSegmentBanner">
+              <div className="activeSegmentInfo">
+                <div className="metaInline">
+                  <strong className="activeSegmentName">
+                    Segmen {activeSegment.index}: {activeSegment.title}
+                  </strong>
+                  {activeSegment.locationHint ? (
+                    <span className="metaTag">{activeSegment.locationHint}</span>
+                  ) : null}
+                </div>
+                {activeSegment.scriptContent.trim() ? (
+                  <p className="activeSegmentExcerpt">{activeSegment.scriptContent.trim()}</p>
+                ) : null}
+              </div>
+
+              <div className="panelCountPicker" role="group" aria-label="Target jumlah panel segmen aktif">
+                <span className="panelCountLabel">Target Panel:</span>
+                {PANEL_COUNT_OPTIONS.map((cnt) => (
+                  <button
+                    key={cnt}
+                    type="button"
+                    className="panelCountBtn mono"
+                    data-active={activeSegTarget === cnt}
+                    disabled={Boolean(busy)}
+                    onClick={() => handleChangeSegmentTargetPanels(activeSegment.id, cnt)}
+                  >
+                    {cnt}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {/* Filmstrip Bar for Active Segment Panels */}
+          <div className="filmstripBar" role="region" aria-label={`Panel Segmen ${activeSegment?.index ?? 1}`}>
+            {activeSegmentFrames.map((frame, idx) => {
+              const pNum = frame.panelNumber ?? idx + 1;
               const thumb = getSelectedFrameImage(frame);
               const isSelected = activeFrame?.id === frame.id;
               return (
@@ -705,9 +1099,9 @@ export default function StoryboardStep({
                 >
                   <div className="filmstripThumb" data-ratio={sb.aspectRatio}>
                     {thumb ? (
-                      <img src={thumb} alt={`Frame ${frame.index}`} />
+                      <img src={thumb} alt={`Panel ${pNum}`} />
                     ) : (
-                      <span className="mono">{String(frame.index).padStart(2, "0")}</span>
+                      <span className="mono">P{pNum}</span>
                     )}
                     {frame.approved ? (
                       <span className="filmstripAccDot" aria-label="ACC">
@@ -716,37 +1110,58 @@ export default function StoryboardStep({
                     ) : null}
                   </div>
                   <div className="filmstripMeta">
-                    <strong className="mono">F{String(frame.index).padStart(2, "0")}</strong>
-                    <span>{frame.title || `Frame ${frame.index}`}</span>
+                    <strong className="mono">P{pNum}</strong>
+                    <span>{frame.title || `Panel ${pNum}`}</span>
                   </div>
                 </button>
               );
             })}
 
-            <button
-              type="button"
-              className="filmstripContinueCard"
-              disabled={Boolean(busy)}
-              onClick={() => void handleContinueNextFrame()}
-              title="Lanjutkan ke frame berikutnya sesuai naskah"
-            >
-              <PlusIcon size={16} />
-              <span>{sb.frames.length === 0 ? "Frame 1" : "Continue"}</span>
-            </button>
+            {activeSegmentFrames.length < 7 ? (
+              <button
+                type="button"
+                className="filmstripContinueCard"
+                disabled={Boolean(busy)}
+                onClick={() => void handleContinueNextFrame()}
+                title={`Lanjutkan ke Panel ${activeSegmentFrames.length + 1} di Segmen ${activeSegment?.index ?? 1}`}
+              >
+                <PlusIcon size={16} />
+                <span>
+                  {activeSegmentFrames.length === 0
+                    ? `Panel 1/${activeSegTarget}`
+                    : `Panel ${activeSegmentFrames.length + 1}/${Math.max(activeSegTarget, activeSegmentFrames.length + 1)}`}
+                </span>
+              </button>
+            ) : null}
+
+            {activeSegCompleted && nextSegment ? (
+              <button
+                type="button"
+                className="filmstripNextSegCard"
+                disabled={Boolean(busy)}
+                onClick={() => handleSelectSegment(nextSegment.id)}
+                title={`Pindah ke Segmen ${nextSegment.index}: ${nextSegment.title}`}
+              >
+                <ArrowRightIcon size={16} />
+                <span>Segmen {nextSegment.index}</span>
+              </button>
+            ) : null}
           </div>
 
           {!activeFrame ? (
             <div className="emptyPanel">
-              <h3>Siap Membuat Frame 1</h3>
+              <h3>
+                Segmen {activeSegment?.index ?? 1}: {activeSegment?.title || "Siap Membuat Panel 1"}
+              </h3>
               <p>
-                Aset &amp; karakter sudah ACC ({approvedAssets.length} aset siap jadi acuan visual). Mulai dari{" "}
-                <strong>Frame 1</strong>, periksa hasilnya, lalu tekan <strong>Continue</strong> untuk Frame 2, 3, dan
-                seterusnya sampai cerita di naskah selesai.
+                Segmen ini akan dipecah menjadi <strong>{activeSegTarget} panel berurutan</strong> (bisa diubah 4–7
+                panel di atas) menggunakan <strong>{approvedAssets.length} aset ACC</strong> agar tiap gerakan mengalir
+                mulus tanpa melompat.
               </p>
 
               <div className="continueEmptyControls">
                 <input
-                  aria-label="Arahan opsional untuk Frame 1"
+                  aria-label="Arahan opsional untuk Panel 1"
                   className="input"
                   value={continueNote}
                   disabled={Boolean(busy)}
@@ -757,7 +1172,7 @@ export default function StoryboardStep({
                       void handleContinueNextFrame();
                     }
                   }}
-                  placeholder="Arahan opsional untuk Frame 1 (kosongkan agar AI mulai tepat dari awal naskah)..."
+                  placeholder={`Arahan opsional untuk Panel 1 Segmen ${activeSegment?.index ?? 1} (kosongkan agar AI mulai tepat dari awal segmen)...`}
                 />
                 <label className="checkRow">
                   <input
@@ -775,7 +1190,9 @@ export default function StoryboardStep({
                     onClick={() => void handleContinueNextFrame()}
                   >
                     <SparklesIcon size={15} />
-                    <span>Buat Frame 1 dari Naskah</span>
+                    <span>
+                      Buat Panel 1/{activeSegTarget} (Segmen {activeSegment?.index ?? 1})
+                    </span>
                     <ArrowRightIcon size={15} />
                   </button>
                   <button
@@ -784,20 +1201,21 @@ export default function StoryboardStep({
                     disabled={Boolean(busy)}
                     onClick={handleAddBlankFrame}
                   >
-                    Tambah Frame Kosong Manual
+                    Tambah Panel Kosong Manual
                   </button>
                 </div>
               </div>
             </div>
           ) : (
             <div className="frameEditorGrid">
-              {/* LEFT COLUMN: Active Frame Visual Stage + Continue Bar */}
+              {/* LEFT COLUMN: Active Panel Visual Stage + Continue Bar */}
               <div className="frameStageCol">
                 <section className="panelCard">
                   <div className="panelHead">
                     <div className="metaInline">
                       <span className="frameIndexPill mono">
-                        FRAME {String(activeFrame.index).padStart(2, "0")}
+                        SEGMEN {String(activeSegment?.index ?? 1).padStart(2, "0")} · PANEL {activePanelNum}/
+                        {Math.max(activeSegTarget, activeSegmentFrames.length)}
                       </span>
                       <span className="metaTag">
                         {SHOT_SIZE_META[activeFrame.shotSize].label} · {CAMERA_ANGLE_META[activeFrame.cameraAngle].label}
@@ -810,7 +1228,7 @@ export default function StoryboardStep({
                       disabled={Boolean(busy)}
                       onClick={() => {
                         if (!activeFrame.approved && !activeImg) {
-                          setError("Generate atau unggah gambar frame dulu sebelum memberi ACC.");
+                          setError("Generate atau unggah gambar panel dulu sebelum memberi ACC.");
                           return;
                         }
                         setError("");
@@ -818,7 +1236,7 @@ export default function StoryboardStep({
                       }}
                     >
                       <CheckIcon size={13} />
-                      <span>{activeFrame.approved ? "Frame ACC" : "ACC Frame"}</span>
+                      <span>{activeFrame.approved ? "Panel ACC" : "ACC Panel"}</span>
                     </button>
                   </div>
 
@@ -827,13 +1245,16 @@ export default function StoryboardStep({
                     {activeImg ? (
                       <img
                         src={activeImg}
-                        alt={`Frame ${activeFrame.index}: ${activeFrame.title}`}
+                        alt={`Panel ${activePanelNum}: ${activeFrame.title}`}
                         className="frameStageImg"
-                        onClick={() => setLightboxIdx(activeIdx)}
+                        onClick={() => setLightboxIdx(activeGlobalIdx)}
                       />
                     ) : (
                       <div className="frameStageEmpty">
-                        <p>Draft Frame {activeFrame.index} siap digambar.</p>
+                        <p>
+                          Draft <strong>Panel {activePanelNum}</strong> (Segmen {activeSegment?.index ?? 1}) siap
+                          digambar.
+                        </p>
                         <p className="fieldHint">
                           Cek pilihan Aset ACC di sebelah kanan, lalu klik <strong>Generate Gambar (4B)</strong>.
                         </p>
@@ -860,7 +1281,7 @@ export default function StoryboardStep({
 
                   {/* Version candidates strip */}
                   {activeFrame.candidates.length > 1 ? (
-                    <div className="candStrip" aria-label={`Versi gambar Frame ${activeFrame.index}`}>
+                    <div className="candStrip" aria-label={`Versi gambar Panel ${activePanelNum}`}>
                       {activeFrame.candidates.map((cand, idx) => (
                         <button
                           key={cand.id}
@@ -915,7 +1336,7 @@ export default function StoryboardStep({
                         type="button"
                         className="btn btnGhost"
                         style={{ marginLeft: "auto" }}
-                        onClick={() => setLightboxIdx(activeIdx)}
+                        onClick={() => setLightboxIdx(activeGlobalIdx)}
                       >
                         Perbesar
                       </button>
@@ -926,7 +1347,7 @@ export default function StoryboardStep({
                   {activeImg ? (
                     <div className="quickReviseRow">
                       <input
-                        aria-label={`Revisi cepat gambar Frame ${activeFrame.index}`}
+                        aria-label={`Revisi cepat gambar Panel ${activePanelNum}`}
                         className="input"
                         value={quickEditText}
                         disabled={Boolean(busy)}
@@ -937,7 +1358,7 @@ export default function StoryboardStep({
                             void handleQuickEditFrame();
                           }
                         }}
-                        placeholder="Revisi gambar ini (mis. wajah lebih kaget, kamera lebih dekat, tambah hujan)..."
+                        placeholder="Revisi gambar ini (mis. kamera lebih dekat, tambah senyum hangat, cahaya lebih fajar)..."
                       />
                       <button
                         type="button"
@@ -951,20 +1372,28 @@ export default function StoryboardStep({
                   ) : null}
                 </section>
 
-                {/* DEDICATED CONTINUE NEXT FRAME BAR */}
-                <section className="panelCard continueCard" aria-label="Lanjutkan ke frame berikutnya">
+                {/* DEDICATED CONTINUE NEXT PANEL / NEXT SEGMENT BAR */}
+                <section className="panelCard continueCard" aria-label="Lanjutkan panel berikutnya">
                   <div className="panelHead">
-                    <h3>Lanjutkan Storyboard (Continue)</h3>
-                    {sb.storyFinished ? (
+                    <h3>
+                      {activeSegCompleted
+                        ? `Segmen ${activeSegment?.index ?? 1} Tercapai (${activeSegmentFrames.length}/${activeSegTarget} Panel)`
+                        : `Lanjutkan Segmen ${activeSegment?.index ?? 1} (Continue)`}
+                    </h3>
+                    {activeSegCompleted ? (
                       <span className="statusBadge" data-tone="ok">
-                        <CheckIcon size={12} /> Akhir Naskah Tercapai
+                        <CheckIcon size={12} /> Segmen Selesai
                       </span>
-                    ) : null}
+                    ) : (
+                      <span className="metaTag mono">
+                        Sisa {activeSegTarget - activeSegmentFrames.length} panel di segmen ini
+                      </span>
+                    )}
                   </div>
 
                   <div className="continueRow">
                     <input
-                      aria-label="Arahan opsional frame berikutnya"
+                      aria-label="Arahan opsional panel berikutnya"
                       className="input"
                       value={continueNote}
                       disabled={Boolean(busy)}
@@ -975,17 +1404,36 @@ export default function StoryboardStep({
                           void handleContinueNextFrame();
                         }
                       }}
-                      placeholder={`Arahan untuk Frame ${sb.frames.length + 1} (opsional, kosongkan agar AI lanjutkan otomatis sesuai naskah)...`}
+                      placeholder={`Arahan untuk Panel ${activeSegmentFrames.length + 1} di Segmen ${activeSegment?.index ?? 1} (opsional)...`}
                     />
-                    <button
-                      type="button"
-                      className="btn btnPrimary"
-                      disabled={Boolean(busy)}
-                      onClick={() => void handleContinueNextFrame()}
-                    >
-                      <span>Continue → Frame {sb.frames.length + 1}</span>
-                      <ArrowRightIcon size={15} />
-                    </button>
+
+                    {activeSegCompleted && nextSegment ? (
+                      <button
+                        type="button"
+                        className="btn btnOk"
+                        disabled={Boolean(busy)}
+                        onClick={() => handleSelectSegment(nextSegment.id)}
+                      >
+                        <span>Lanjut Segmen {nextSegment.index}</span>
+                        <ArrowRightIcon size={15} />
+                      </button>
+                    ) : null}
+
+                    {activeSegmentFrames.length < 7 ? (
+                      <button
+                        type="button"
+                        className={activeSegCompleted && nextSegment ? "btn" : "btn btnPrimary"}
+                        disabled={Boolean(busy)}
+                        onClick={() => void handleContinueNextFrame()}
+                      >
+                        <span>
+                          {activeSegCompleted
+                            ? `+ Panel ${activeSegmentFrames.length + 1}`
+                            : `Continue → Panel ${activeSegmentFrames.length + 1}/${activeSegTarget}`}
+                        </span>
+                        {!activeSegCompleted ? <ArrowRightIcon size={15} /> : null}
+                      </button>
+                    ) : null}
                   </div>
 
                   <div className="continueSubRow">
@@ -1005,23 +1453,25 @@ export default function StoryboardStep({
                       onClick={() => setViewMode("cards")}
                     >
                       <GridIcon size={13} />
-                      <span>Lihat Preview Kartu ({sb.frames.length})</span>
+                      <span>Lihat Preview Strip ({orderedFrames.length})</span>
                     </button>
                   </div>
                 </section>
               </div>
 
-              {/* RIGHT COLUMN: Active Frame Details & ACC Asset Binding */}
-              <section className="panelCard frameDetailsCol" aria-label="Detail frame aktif">
+              {/* RIGHT COLUMN: Active Panel Details & ACC Asset Binding */}
+              <section className="panelCard frameDetailsCol" aria-label="Detail panel aktif">
                 <div className="panelHead">
-                  <h3>Detail Frame {String(activeFrame.index).padStart(2, "0")}</h3>
+                  <h3>
+                    Detail Panel {activePanelNum} (Segmen {activeSegment?.index ?? 1})
+                  </h3>
                   <div className="actionGroup">
                     <button
                       type="button"
                       className="btn btnGhost btnSm btnIcon"
-                      disabled={Boolean(busy) || activeIdx <= 0}
-                      title="Geser frame ke kiri"
-                      aria-label="Geser frame ke kiri"
+                      disabled={Boolean(busy) || activeSegPos <= 0}
+                      title="Geser panel ke kiri"
+                      aria-label="Geser panel ke kiri"
                       onClick={() => handleMoveFrame(activeFrame.id, -1)}
                     >
                       <ChevronLeftIcon size={14} />
@@ -1029,9 +1479,9 @@ export default function StoryboardStep({
                     <button
                       type="button"
                       className="btn btnGhost btnSm btnIcon"
-                      disabled={Boolean(busy) || activeIdx >= sb.frames.length - 1}
-                      title="Geser frame ke kanan"
-                      aria-label="Geser frame ke kanan"
+                      disabled={Boolean(busy) || activeSegPos >= activeSegmentFrames.length - 1}
+                      title="Geser panel ke kanan"
+                      aria-label="Geser panel ke kanan"
                       onClick={() => handleMoveFrame(activeFrame.id, 1)}
                     >
                       <ChevronRightIcon size={14} />
@@ -1040,8 +1490,8 @@ export default function StoryboardStep({
                       type="button"
                       className="btn btnDanger btnSm btnIcon"
                       disabled={Boolean(busy)}
-                      title="Hapus frame ini"
-                      aria-label="Hapus frame ini"
+                      title="Hapus panel ini"
+                      aria-label="Hapus panel ini"
                       onClick={() => handleDeleteFrame(activeFrame.id)}
                     >
                       <TrashIcon size={14} />
@@ -1051,14 +1501,14 @@ export default function StoryboardStep({
 
                 {activeFrame.scriptExcerpt ? (
                   <div className="scriptExcerptBox">
-                    <span className="fieldLabel">Bagian Naskah</span>
+                    <span className="fieldLabel">Cuplikan Naskah Segmen</span>
                     <p>{activeFrame.scriptExcerpt}</p>
                   </div>
                 ) : null}
 
                 <div className="fieldGroup">
                   <label className="fieldLabel" htmlFor="fr-title">
-                    Judul Singkat Frame
+                    Judul Singkat Panel (Caption Strip)
                   </label>
                   <input
                     id="fr-title"
@@ -1066,12 +1516,16 @@ export default function StoryboardStep({
                     value={activeFrame.title}
                     disabled={Boolean(busy)}
                     onChange={(e) => updateFrame(activeFrame.id, { title: e.target.value })}
+                    placeholder="Contoh: Tiba di Pelabuhan"
                   />
+                  <span className="fieldHint mono">
+                    Tampil di papan: PANEL {activePanelNum}: {(activeFrame.title || `Panel ${activePanelNum}`).toUpperCase()}
+                  </span>
                 </div>
 
                 <div className="fieldGroup">
                   <label className="fieldLabel" htmlFor="fr-summary">
-                    Aksi Visual di Frame Ini (1 Momen Jelas)
+                    Aksi Micro-Momen Panel Ini
                   </label>
                   <textarea
                     id="fr-summary"
@@ -1083,14 +1537,14 @@ export default function StoryboardStep({
                       dirtyPromptIdsRef.current.add(activeFrame.id);
                       updateFrame(activeFrame.id, { sceneSummary: e.target.value });
                     }}
-                    placeholder="Apa yang sedang terjadi secara visual di frame ini..."
+                    placeholder="Satu langkah gerakan kecil yang nyambung langsung dari panel sebelumnya..."
                   />
                 </div>
 
                 {/* Clickable ACC Assets chips */}
                 <div className="fieldGroup">
                   <span className="fieldLabel">
-                    Aset ACC yang Tampil di Frame Ini (klik untuk pilih/lepas)
+                    Aset ACC yang Tampil di Panel Ini (klik untuk pilih/lepas)
                   </span>
                   <div className="assetChipGrid">
                     {approvedAssets.map((asset) => {
@@ -1120,7 +1574,7 @@ export default function StoryboardStep({
                   </div>
                 </div>
 
-                {activeFrame.index > 1 ? (
+                {activeGlobalIdx > 0 ? (
                   <label className="checkRow continuityCheck">
                     <input
                       type="checkbox"
@@ -1131,8 +1585,11 @@ export default function StoryboardStep({
                       }
                     />
                     <span>
-                      Lokasi sama dengan Frame {activeFrame.index - 1} (bawa warna &amp; cahaya Frame{" "}
-                      {activeFrame.index - 1} sebagai acuan)
+                      Lokasi &amp; cahaya nyambung dengan{" "}
+                      {activePanelNum > 1
+                        ? `Panel ${activePanelNum - 1}`
+                        : `panel terakhir Segmen ${(activeSegment?.index ?? 2) - 1}`}{" "}
+                      (bawa sebagai acuan warna FLUX.2)
                     </span>
                   </label>
                 ) : null}
@@ -1189,7 +1646,7 @@ export default function StoryboardStep({
                     value={activeFrame.dialogue}
                     disabled={Boolean(busy)}
                     onChange={(e) => updateFrame(activeFrame.id, { dialogue: e.target.value })}
-                    placeholder="Kosongkan jika frame tanpa dialog"
+                    placeholder="Kosongkan jika panel visual murni tanpa dialog"
                   />
                 </div>
 
@@ -1220,21 +1677,22 @@ export default function StoryboardStep({
       )}
 
       {/* =================================================================== */}
-      {/* FULL-SCREEN CARD LIGHTBOX READER (NO DOWNLOAD NEEDED!)              */}
+      {/* FULL-SCREEN PANEL LIGHTBOX READER (NO DOWNLOAD NEEDED!)             */}
       {/* =================================================================== */}
       {lightboxFrame && lightboxIdx !== null ? (
         <div
           className="modalBackdrop"
           role="dialog"
           aria-modal="true"
-          aria-label={`Preview Frame ${lightboxFrame.index}`}
+          aria-label={`Preview Panel ${lightboxFrame.panelNumber ?? lightboxFrame.index}`}
           onClick={() => setLightboxIdx(null)}
         >
           <div className="lightboxDialog" onClick={(e) => e.stopPropagation()}>
             <div className="lightboxHeader">
               <div className="metaInline">
                 <span className="frameIndexPill mono">
-                  FRAME {String(lightboxFrame.index).padStart(2, "0")} / {String(sb.frames.length).padStart(2, "0")}
+                  SEGMEN {String(lightboxSegment?.index ?? 1).padStart(2, "0")} · PANEL{" "}
+                  {lightboxFrame.panelNumber ?? 1}/{Math.max(lightboxSegment?.targetPanels ?? 5, lightboxSegFrames.length)}
                 </span>
                 <h3>{lightboxFrame.title}</h3>
                 <span className="metaTag">
@@ -1256,7 +1714,7 @@ export default function StoryboardStep({
                 type="button"
                 className="btn btnIcon lightboxNavBtn"
                 disabled={lightboxIdx <= 0}
-                aria-label="Frame sebelumnya"
+                aria-label="Panel sebelumnya"
                 onClick={() => setLightboxIdx((i) => (i !== null && i > 0 ? i - 1 : i))}
               >
                 <ChevronLeftIcon size={18} />
@@ -1266,21 +1724,23 @@ export default function StoryboardStep({
                 {getSelectedFrameImage(lightboxFrame) ? (
                   <img
                     src={getSelectedFrameImage(lightboxFrame)!}
-                    alt={`Frame ${lightboxFrame.index}: ${lightboxFrame.title}`}
+                    alt={`Panel ${lightboxFrame.panelNumber ?? lightboxFrame.index}: ${lightboxFrame.title}`}
                     className="lightboxImg"
                   />
                 ) : (
-                  <div className="lightboxEmpty">Frame {lightboxFrame.index} belum digambar.</div>
+                  <div className="lightboxEmpty">
+                    Panel {lightboxFrame.panelNumber ?? lightboxFrame.index} belum digambar.
+                  </div>
                 )}
               </div>
 
               <button
                 type="button"
                 className="btn btnIcon lightboxNavBtn"
-                disabled={lightboxIdx >= sb.frames.length - 1}
-                aria-label="Frame berikutnya"
+                disabled={lightboxIdx >= orderedFrames.length - 1}
+                aria-label="Panel berikutnya"
                 onClick={() =>
-                  setLightboxIdx((i) => (i !== null && i < sb.frames.length - 1 ? i + 1 : i))
+                  setLightboxIdx((i) => (i !== null && i < orderedFrames.length - 1 ? i + 1 : i))
                 }
               >
                 <ChevronRightIcon size={18} />
@@ -1295,17 +1755,20 @@ export default function StoryboardStep({
                 </blockquote>
               ) : null}
               <div className="lightboxFooterRow">
-                <span className="fieldHint">Gunakan tombol panah ← → di keyboard untuk pindah frame.</span>
+                <span className="fieldHint">
+                  Panel {lightboxIdx + 1} dari {orderedFrames.length} total · Gunakan ← → di keyboard untuk berpindah.
+                </span>
                 <button
                   type="button"
                   className="btn btnSm"
                   onClick={() => {
+                    if (lightboxFrame.segmentId) setActiveSegmentId(lightboxFrame.segmentId);
                     setActiveFrameId(lightboxFrame.id);
                     setLightboxIdx(null);
                     setViewMode("editor");
                   }}
                 >
-                  Edit Frame Ini
+                  Edit Panel Ini
                 </button>
               </div>
             </div>

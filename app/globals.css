@@ -2813,6 +2813,487 @@ video {
   gap: 10px;
 }
 
+/* ==========================================================================
+   PER-SEGMENT SCRIPT CARDS & 4-7 PANEL STORYBOARD STRIP SHEETS
+   ========================================================================== */
+
+.scriptSegmentList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.scriptSegmentCard {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 140ms ease;
+}
+
+.scriptSegmentCard:hover {
+  border-color: var(--border-strong);
+}
+
+.scriptSegmentHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.scriptSegTextarea {
+  min-height: 92px;
+  line-height: 1.55;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.addSegmentBtn {
+  align-self: flex-start;
+  border-style: dashed;
+}
+
+.segmentEmptyBox {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  padding: 28px 18px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.segmentEmptyBox p {
+  margin: 0;
+  max-width: 460px;
+  color: var(--ink-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Tactile 4 / 5 / 6 / 7 target panel selector */
+.panelCountPicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+}
+
+.panelCountLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  margin-right: 4px;
+  white-space: nowrap;
+}
+
+.panelCountBtn {
+  min-width: 26px;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 11.5px;
+  font-weight: 700;
+  transition: all 120ms ease;
+}
+
+.panelCountBtn:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.panelCountBtn[data-active="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* STEP 3: Segment Switcher Bar & Active Segment Banner */
+.segmentTabBar {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.segmentTabBtn {
+  min-width: 170px;
+  max-width: 240px;
+  flex: 1 0 175px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink-muted);
+  text-align: left;
+  transition: border-color 130ms ease, background-color 130ms ease;
+}
+
+.segmentTabBtn:hover {
+  border-color: var(--border-strong);
+  color: var(--ink);
+}
+
+.segmentTabBtn[data-active="true"] {
+  border-color: var(--accent);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.segmentTabBtn[data-done="true"]:not([data-active="true"]) {
+  border-color: rgba(47, 108, 79, 0.7);
+}
+
+.segmentTabTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.segmentTabNum {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--accent-text);
+}
+
+.segmentTabCount {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--ink-muted);
+}
+
+.segmentTabCount[data-done="true"] {
+  background: var(--ok-bg);
+  border-color: #2f6c4f;
+  color: var(--ok);
+}
+
+.segmentTabTitle {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activeSegmentBanner {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: 11px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activeSegmentInfo {
+  flex: 1 1 360px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.activeSegmentName {
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+.activeSegmentExcerpt {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.filmstripNextSegCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 96px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid #2f6c4f;
+  background: var(--ok-bg);
+  color: var(--ok);
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+  transition: background-color 140ms ease;
+}
+
+.filmstripNextSegCard:hover:not(:disabled) {
+  background: #1a3829;
+}
+
+/* STEP 3B: HORIZONTAL STORYBOARD STRIP SHEET (MATCHING COMIC/FILM PANEL STRIP) */
+.segmentStripStack {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.segmentDetailGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.segmentStripBoard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.segmentStripHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 16px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.segmentStripTitle {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.segmentStripSheetWrap {
+  overflow-x: auto;
+  background: #ece7dc;
+  padding: 18px 16px 20px;
+}
+
+.segmentStripSheet {
+  background: #f5f1e8;
+  border: 1px solid #dad3c5;
+  border-radius: 6px;
+  padding: 20px 14px 16px;
+  box-shadow: 0 6px 24px rgba(10, 12, 16, 0.14);
+  min-width: fit-content;
+}
+
+.segmentStripRow {
+  display: grid;
+  grid-template-columns: repeat(var(--strip-cols, 5), minmax(195px, 1fr));
+  align-items: start;
+}
+
+.segmentStripRow[data-ratio="9:16"] {
+  grid-template-columns: repeat(var(--strip-cols, 5), minmax(156px, 1fr));
+}
+
+.stripPanelCell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+  padding: 4px 12px;
+}
+
+/* Signature thin vertical hairline divider between adjacent panels */
+.stripPanelCell:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: -6px;
+  bottom: -2px;
+  right: 0;
+  width: 1px;
+  background: rgba(28, 32, 40, 0.24);
+  pointer-events: none;
+}
+
+.stripPanelFrameBtn {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 2px solid #1d2026;
+  border-radius: 2px;
+  background: #14171c;
+  overflow: hidden;
+  box-shadow: 0 3px 10px rgba(18, 21, 28, 0.16);
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+}
+
+.stripPanelFrameBtn[data-ratio="16:9"] {
+  aspect-ratio: 16 / 9;
+}
+
+.stripPanelFrameBtn[data-ratio="9:16"] {
+  aspect-ratio: 3 / 4.4;
+}
+
+.stripPanelFrameBtn:hover {
+  transform: translateY(-2px);
+  border-color: #c27820;
+  box-shadow: 0 8px 18px rgba(18, 21, 28, 0.24);
+}
+
+.stripPanelImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.stripPanelEmpty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  color: #9ba3b0;
+  font-size: 12px;
+}
+
+.stripPanelEmpty small {
+  font-size: 10.5px;
+  opacity: 0.78;
+}
+
+.stripPanelHoverTag {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(15, 18, 24, 0.84);
+  color: #f3ede4;
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 130ms ease;
+}
+
+.stripPanelFrameBtn:hover .stripPanelHoverTag,
+.stripPanelFrameBtn:focus-visible .stripPanelHoverTag {
+  opacity: 1;
+}
+
+.stripPanelAccDot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 19px;
+  height: 19px;
+  border-radius: 999px;
+  background: rgba(20, 44, 32, 0.92);
+  border: 1px solid #3c8c67;
+  color: #8ce0b3;
+  display: grid;
+  place-items: center;
+}
+
+.stripPanelCaption {
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 0.045em;
+  line-height: 1.35;
+  color: #1c1f26;
+  padding: 0 2px;
+}
+
+.stripPanelCaption.isMuted {
+  color: #8b8579;
+  font-weight: 600;
+}
+
+.stripPanelDialogue {
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #4f4b44;
+  font-style: italic;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  padding: 0 4px;
+}
+
+.stripPanelGhostBtn {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1.5px dashed #b9b1a1;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.45);
+  color: #6b655a;
+  font-size: 11.5px;
+  font-weight: 700;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.stripPanelGhostBtn[data-ratio="16:9"] {
+  aspect-ratio: 16 / 9;
+}
+
+.stripPanelGhostBtn[data-ratio="9:16"] {
+  aspect-ratio: 3 / 4.4;
+}
+
+.stripPanelGhostBtn:not(:disabled):hover {
+  border-color: #c27820;
+  background: rgba(229, 154, 60, 0.14);
+  color: #8f4f08;
+}
+
+.stripPanelGhostBtn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 @media (max-width: 1024px) {
   .scriptLayout,
   .frameEditorGrid {
@@ -2842,6 +3323,14 @@ video {
   .storyboardCardGrid[data-ratio="9:16"],
   .assetGrid {
     grid-template-columns: 1fr;
+  }
+
+  .segmentStripSheetWrap {
+    padding: 12px 10px 14px;
+  }
+
+  .segmentStripSheet {
+    padding: 14px 8px 12px;
   }
 }
 

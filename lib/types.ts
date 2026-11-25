@@ -29,6 +29,15 @@ export interface StoryAsset {
   selectedCandidateId?: string;
 }
 
+export interface StorySegment {
+  id: string;
+  index: number;
+  title: string;
+  locationHint: string;
+  scriptContent: string;
+  targetPanels: number; // 4 to 7 panels per segment to prevent jump cuts
+}
+
 export interface StoryFrameCandidate {
   id: string;
   dataUrl: string;
@@ -39,6 +48,8 @@ export interface StoryFrameCandidate {
 
 export interface StoryFrame {
   id: string;
+  segmentId?: string;
+  panelNumber?: number;
   index: number;
   title: string;
   scriptExcerpt: string;
@@ -60,6 +71,7 @@ export interface StoryboardData {
   aspectRatio: AspectRatio;
   visualStyle: string;
   scriptText: string;
+  segments?: StorySegment[];
   scriptApproved: boolean;
   assets: StoryAsset[];
   assetsApproved: boolean;

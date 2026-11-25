@@ -16,8 +16,10 @@ import {
   countApprovedAssets,
   createStoryboardProject,
   ensureStoryboard,
+  formatSegmentsToScript,
   getSelectedAssetImage,
   parseExtractedStoryAssets,
+  parseScriptIntoSegments,
 } from "@/lib/storyboard";
 import AssetsStep from "./AssetsStep";
 import ProjectDashboard, { type ProjectMetaDraft } from "./ProjectDashboard";
@@ -359,17 +361,27 @@ export default function NmcStudio() {
   const handleExtractAssetsFromScript = async () => {
     const curProj = latestProjectRef.current ?? project;
     const curSb = ensureStoryboard(curProj);
-    if (!curSb.scriptText.trim()) {
+    const syncedSegments =
+      curSb.segments && curSb.segments.length > 0
+        ? curSb.segments
+        : parseScriptIntoSegments(curSb.scriptText, [], 5);
+    const fullScript = curSb.scriptText.trim() || formatSegmentsToScript(syncedSegments);
+    if (!fullScript) {
       setStepNotice("Tulis atau generate naskah terlebih dahulu di Tahap 1.");
       return;
     }
     setStepNotice("");
-    setGlobalBusy("Membaca seluruh naskah & mengekstrak karakter, lokasi, dan properti yang dibutuhkan...");
-    patchStoryboard({ scriptApproved: true, step: "assets" });
+    setGlobalBusy("Membaca seluruh naskah per-segmen & mengekstrak karakter, lokasi, dan properti yang dibutuhkan...");
+    patchStoryboard({
+      scriptText: fullScript,
+      segments: syncedSegments,
+      scriptApproved: true,
+      step: "assets",
+    });
     try {
       const built = buildExtractAssetsFromScriptPrompt({
         projectName: curProj.name,
-        scriptText: curSb.scriptText,
+        scriptText: fullScript,
         visualStyle: curSb.visualStyle,
       });
       const res = await callAi(textProfile, "text", built);
@@ -379,6 +391,8 @@ export default function NmcStudio() {
       }
       const extracted = parseExtractedStoryAssets(res.text);
       patchStoryboard({
+        scriptText: fullScript,
+        segments: syncedSegments,
         scriptApproved: true,
         assets: extracted,
         assetsApproved: false,

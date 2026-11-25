@@ -64,12 +64,18 @@ import {
   buildQuickEditPrompt,
   buildStoryboardMarkdown,
   buildStoryboardZip,
+  clampTargetPanels,
   composeStoryboardFramePrompt,
   createStoryboardProject,
   ensureStoryboard,
+  formatSegmentsToScript,
+  getSegmentFrames,
+  getStoryboardSegments,
   parseExtractedStoryAssets,
   parseNextFrameResponse,
   parseQuickEditResponse,
+  parseScriptIntoSegments,
+  reindexStoryboardFrames,
 } from "./storyboard.ts";
 import type { NmcProject, SegmentNodeData } from "./types.ts";
 
@@ -582,5 +588,142 @@ assert.ok(buildStoryboardMarkdown(populatedV2).includes("Frame 02: Menemukan Amp
 const sbZip = buildStoryboardZip(populatedV2);
 assert.equal(sbZip[0], 0x50);
 assert.equal(sbZip[1], 0x4b);
+
+// 14. Per-Segment Script & 4-7 Panel Smooth Anti-Jump Storyboard Engine
+assert.equal(clampTargetPanels(2), 4);
+assert.equal(clampTargetPanels(5), 5);
+assert.equal(clampTargetPanels(9), 7);
+assert.equal(clampTargetPanels(undefined), 5);
+
+const multiSegScript = [
+  "SEGMEN 1 — Tiba di Pelabuhan | EXT. DERMAGA KOTA - SUBUH",
+  "Dimas turun dari kapal, menyusuri jalan batu, berhenti di bawah lampu jalan membaca surat, lalu bertanya arah ke toko roti.",
+  "",
+  "SEGMEN 2 — Menuju Fajar | EXT. JALAN KAMPUNG - PAGI",
+  "Dimas berjalan mengikuti petunjuk arah sambil tersenyum menyambut matahari terbit.",
+].join("\n");
+
+const parsedSegs = parseScriptIntoSegments(multiSegScript, [], 5);
+assert.equal(parsedSegs.length, 2);
+assert.equal(parsedSegs[0].title, "Tiba di Pelabuhan");
+assert.equal(parsedSegs[0].locationHint, "EXT. DERMAGA KOTA - SUBUH");
+assert.equal(parsedSegs[0].targetPanels, 5);
+assert.equal(parsedSegs[1].title, "Menuju Fajar");
+
+const formattedBack = formatSegmentsToScript(parsedSegs);
+assert.ok(formattedBack.includes("SEGMEN 1 — Tiba di Pelabuhan | EXT. DERMAGA KOTA - SUBUH"));
+assert.ok(formattedBack.includes("SEGMEN 2 — Menuju Fajar | EXT. JALAN KAMPUNG - PAGI"));
+
+// Paragraph fallback when user pastes plain prose without SEGMEN headers
+const plainParsed = parseScriptIntoSegments("Paragraf satu tentang kedatangan.\n\nParagraf dua tentang perjalanan pulang.");
+assert.equal(plainParsed.length, 2);
+
+const seg1Target = { ...parsedSegs[0], targetPanels: 5 };
+const seg2Target = { ...parsedSegs[1], targetPanels: 4 };
+
+const segPanel1Prompt = buildNextFramePrompt({
+  projectName: "Pelabuhan Subuh",
+  scriptText: formattedBack,
+  visualStyle: VISUAL_STYLE_PRESETS[1].prompt,
+  aspectRatio: "9:16",
+  approvedAssets: accAssets,
+  previousFrames: [],
+  activeSegment: seg1Target,
+  segmentFrames: [],
+  totalSegments: 2,
+});
+assert.ok(segPanel1Prompt.prompt.includes("PANEL 1 dari 5 pada SEGMEN 1"));
+assert.ok(segPanel1Prompt.prompt.includes("JANGAN langsung melompat"));
+
+const segP1 = parseNextFrameResponse(
+  JSON.stringify({
+    title: "Tiba di Pelabuhan",
+    scriptExcerpt: "Dimas turun dari kapal.",
+    sceneSummary: "Dimas berdiri di dermaga memegang koper menatap lampu jalan subuh.",
+    dialogue: "",
+    shotSize: "WS",
+    cameraAngle: "Front",
+    assetIds: [accAssets[0].id, accAssets[1].id],
+    sameLocationAsPrev: false,
+    visualPrompt: "Wide shot of Dimas standing calmly on a misty harbor pier next to a glowing streetlamp at dawn",
+    segmentFinished: false,
+    storyFinished: false,
+  }),
+  accAssets,
+  [],
+  { activeSegment: seg1Target, segmentFrames: [] },
+);
+assert.equal(segP1.frame.segmentId, seg1Target.id);
+assert.equal(segP1.frame.panelNumber, 1);
+assert.equal(segP1.segmentFinished, false);
+
+const segP2 = parseNextFrameResponse(
+  JSON.stringify({
+    title: "Menyusuri Jalan",
+    scriptExcerpt: "Menyusuri jalan batu.",
+    sceneSummary: "Dimas melangkah pelan menyusuri gang batu basah.",
+    dialogue: "",
+    shotSize: "MS",
+    cameraAngle: "Front",
+    assetIds: [accAssets[0].id],
+    visualPrompt: "Medium shot of Dimas walking forward along a quiet misty cobblestone alley at dawn",
+    segmentFinished: false,
+    storyFinished: false,
+  }),
+  accAssets,
+  [segP1.frame],
+  { activeSegment: seg1Target, segmentFrames: [segP1.frame] },
+);
+assert.equal(segP2.frame.segmentId, seg1Target.id);
+assert.equal(segP2.frame.panelNumber, 2);
+assert.equal(segP2.frame.sameLocationAsPrev, true, "Panel 2 inside a segment must default to continuous location/lighting");
+
+const seg2P1 = parseNextFrameResponse(
+  JSON.stringify({
+    title: "Menuju Fajar",
+    scriptExcerpt: "Dimas berjalan menuju fajar.",
+    sceneSummary: "Dimas melangkah ringan ke arah cahaya matahari pagi.",
+    dialogue: "",
+    shotSize: "WS",
+    cameraAngle: "Rear 3/4",
+    assetIds: [accAssets[0].id],
+    sameLocationAsPrev: false,
+    visualPrompt: "Wide rear three-quarter shot of Dimas walking down a sunlit village street toward warm golden dawn",
+    segmentFinished: false,
+    storyFinished: false,
+  }),
+  accAssets,
+  [segP1.frame, segP2.frame],
+  { activeSegment: seg2Target, segmentFrames: [] },
+);
+assert.equal(seg2P1.frame.segmentId, seg2Target.id);
+assert.equal(seg2P1.frame.panelNumber, 1);
+
+// Reindexing sorts out-of-order array strictly by Segment order and keeps per-segment panelNumber clean
+const reindexed = reindexStoryboardFrames([seg2P1.frame, segP1.frame, segP2.frame], [seg1Target, seg2Target]);
+assert.deepEqual(
+  reindexed.map((f) => `${f.segmentId}:${f.panelNumber}:${f.index}`),
+  [`${seg1Target.id}:1:1`, `${seg1Target.id}:2:2`, `${seg2Target.id}:1:3`],
+);
+
+const segmentedProject: NmcProject = {
+  ...v2Proj,
+  storyboard: {
+    ...v2Proj.storyboard!,
+    scriptText: formattedBack,
+    segments: [seg1Target, seg2Target],
+    scriptApproved: true,
+    assets: accAssets,
+    assetsApproved: true,
+    frames: reindexed,
+  },
+};
+assert.equal(getStoryboardSegments(segmentedProject.storyboard!).length, 2);
+assert.equal(getSegmentFrames(segmentedProject.storyboard!, seg1Target.id, 0).length, 2);
+assert.equal(getSegmentFrames(segmentedProject.storyboard!, seg2Target.id, 1).length, 1);
+const segMd = buildStoryboardMarkdown(segmentedProject);
+assert.ok(segMd.includes("### Segmen 01: Tiba di Pelabuhan"));
+assert.ok(segMd.includes("#### Panel 2 — Frame 02: Menyusuri Jalan"));
+assert.ok(segMd.includes("### Segmen 02: Menuju Fajar"));
 
 console.log("nmcGen pipeline tests: all passed");

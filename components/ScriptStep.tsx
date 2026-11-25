@@ -1,10 +1,16 @@
 "use client";
-import React, { useState } from "react";
-import type { AspectRatio, ProviderProfile, StoryboardData } from "@/lib/types";
-import { matchVisualStylePreset, VISUAL_STYLE_PRESETS } from "@/lib/presets";
+import React, { useMemo, useState } from "react";
+import type { AspectRatio, ProviderProfile, StoryboardData, StorySegment } from "@/lib/types";
+import { matchVisualStylePreset, uid, VISUAL_STYLE_PRESETS } from "@/lib/presets";
 import { callAi } from "@/lib/storage";
-import { buildGenerateScriptPrompt, buildReviseScriptPrompt } from "@/lib/storyboard";
-import { ArrowRightIcon, CheckIcon, SparklesIcon } from "./Icons";
+import {
+  buildGenerateScriptPrompt,
+  buildReviseScriptPrompt,
+  clampTargetPanels,
+  formatSegmentsToScript,
+  parseScriptIntoSegments,
+} from "@/lib/storyboard";
+import { ArrowRightIcon, CheckIcon, PlusIcon, SparklesIcon, TrashIcon } from "./Icons";
 
 interface ScriptStepProps {
   projectName: string;
@@ -22,6 +28,8 @@ interface ScriptStepProps {
   externalBusy: string;
 }
 
+const PANEL_COUNT_OPTIONS = [4, 5, 6, 7] as const;
+
 export default function ScriptStep({
   projectName,
   sb,
@@ -34,6 +42,20 @@ export default function ScriptStep({
   onOpenSettings,
   externalBusy,
 }: ScriptStepProps) {
+  const segments = useMemo<StorySegment[]>(() => {
+    if (sb.segments && sb.segments.length > 0) {
+      return sb.segments.map((s, idx) => ({
+        ...s,
+        index: idx + 1,
+        targetPanels: clampTargetPanels(s.targetPanels),
+      }));
+    }
+    return parseScriptIntoSegments(sb.scriptText, [], 5);
+  }, [sb.segments, sb.scriptText]);
+
+  const [editorMode, setEditorMode] = useState<"segments" | "raw">(() =>
+    segments.length > 0 ? "segments" : "raw",
+  );
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -43,7 +65,53 @@ export default function ScriptStep({
   const selectedPresetId = matchVisualStylePreset(sb.visualStyle);
   const selectedPreset = VISUAL_STYLE_PRESETS.find((p) => p.id === selectedPresetId);
   const wordCount = sb.scriptText.trim() ? sb.scriptText.trim().split(/\s+/).length : 0;
-  const sceneCount = (sb.scriptText.match(/(?:^|\n)\s*ADEGAN\s+\d+/gi) ?? []).length;
+  const totalTargetPanels = segments.reduce((sum, s) => sum + clampTargetPanels(s.targetPanels), 0);
+
+  const commitSegments = (nextList: StorySegment[]) => {
+    const normalized = nextList.map((s, idx) => ({
+      ...s,
+      index: idx + 1,
+      targetPanels: clampTargetPanels(s.targetPanels),
+    }));
+    onPatchSb({
+      segments: normalized,
+      scriptText: formatSegmentsToScript(normalized),
+      scriptApproved: false,
+    });
+  };
+
+  const handleUpdateSegment = (segId: string, patch: Partial<StorySegment>) => {
+    const next = segments.map((s) => (s.id === segId ? { ...s, ...patch } : s));
+    commitSegments(next);
+  };
+
+  const handleAddSegment = () => {
+    const nextIdx = segments.length + 1;
+    const fresh: StorySegment = {
+      id: uid(),
+      index: nextIdx,
+      title: `Segmen ${nextIdx}`,
+      locationHint: "",
+      scriptContent: "",
+      targetPanels: 5,
+    };
+    commitSegments([...segments, fresh]);
+    setEditorMode("segments");
+  };
+
+  const handleDeleteSegment = (segId: string) => {
+    if (segments.length <= 1) return;
+    commitSegments(segments.filter((s) => s.id !== segId));
+  };
+
+  const handleRawScriptChange = (value: string) => {
+    const parsed = parseScriptIntoSegments(value, segments, 5);
+    onPatchSb({
+      scriptText: value,
+      segments: parsed,
+      scriptApproved: false,
+    });
+  };
 
   const handleGenerateScript = async () => {
     const idea = sb.idea.trim() || projectName.trim();
@@ -51,7 +119,7 @@ export default function ScriptStep({
       setError("Tulis ide cerita terlebih dahulu sebelum generate naskah.");
       return;
     }
-    setBusy("Menyusun naskah lengkap dari ide cerita...");
+    setBusy("Menyusun naskah terbagi per segmen dari ide cerita...");
     setError("");
     setNotice("");
     try {
@@ -67,12 +135,16 @@ export default function ScriptStep({
         setError(res.error || "AI gagal membuat naskah. Periksa koneksi Cloudflare Workers AI / Pengaturan.");
         return;
       }
+      const nextText = res.text.trim();
+      const parsedSegs = parseScriptIntoSegments(nextText, [], 5);
       onPatchSb({
-        scriptText: res.text.trim(),
+        scriptText: nextText,
+        segments: parsedSegs,
         scriptApproved: false,
       });
+      if (parsedSegs.length > 0) setEditorMode("segments");
       setNotice(
-        `Naskah selesai disusun${res.usedModel ? ` (${res.usedModel.split("/").pop()})` : ""}. Silakan baca & edit jika perlu, lalu klik ACC Naskah.`,
+        `Naskah selesai dibagi menjadi ${parsedSegs.length || 1} segmen${res.usedModel ? ` (${res.usedModel.split("/").pop()})` : ""}. Atur jumlah panel per segmen (4–7 panel) bila perlu, lalu klik ACC Naskah.`,
       );
     } catch (err) {
       setError(`Gagal generate naskah: ${(err as Error).message}`);
@@ -87,10 +159,10 @@ export default function ScriptStep({
       return;
     }
     if (!reviseNote.trim()) {
-      setError("Tulis instruksi revisi terlebih dahulu (misal: ganti endingnya jadi lebih hangat).");
+      setError("Tulis instruksi revisi terlebih dahulu (misal: tambah 1 segmen penutup yang hangat).");
       return;
     }
-    setBusy("Merevisi naskah sesuai catatan Anda...");
+    setBusy("Merevisi naskah per segmen sesuai catatan Anda...");
     setError("");
     setNotice("");
     try {
@@ -106,12 +178,16 @@ export default function ScriptStep({
         setError(res.error || "AI gagal merevisi naskah.");
         return;
       }
+      const nextText = res.text.trim();
+      const parsedSegs = parseScriptIntoSegments(nextText, segments, 5);
       onPatchSb({
-        scriptText: res.text.trim(),
+        scriptText: nextText,
+        segments: parsedSegs,
         scriptApproved: false,
       });
+      if (parsedSegs.length > 0) setEditorMode("segments");
       setReviseNote("");
-      setNotice("Naskah berhasil diperbarui sesuai revisi Anda.");
+      setNotice(`Naskah diperbarui (${parsedSegs.length || 1} segmen).`);
     } catch (err) {
       setError(`Gagal merevisi naskah: ${(err as Error).message}`);
     } finally {
@@ -123,11 +199,12 @@ export default function ScriptStep({
     <div className="stepContainer">
       <div className="stepIntroRow">
         <div>
-          <span className="stepKicker mono">TAHAP 1 DARI 3</span>
-          <h2 className="stepTitle">Ide Cerita &amp; Naskah</h2>
+          <span className="stepKicker mono">TAHAP 1 DARI 3 · NASKAH PER-SEGMEN</span>
+          <h2 className="stepTitle">Ide Cerita &amp; Naskah Per-Segmen</h2>
           <p className="stepSubtitle">
-            Tulis ide singkat, generate naskah lengkapnya, lalu periksa sampai alurnya pas. Semua karakter dan lokasi di
-            tahap berikutnya akan diambil ketat dari naskah ini.
+            Naskah dibagi menjadi beberapa <strong>Segmen</strong>, dan tiap segmen akan dipecah menjadi{" "}
+            <strong>4–7 panel storyboard berurutan</strong> di Tahap 3 agar alur visual mengalir halus tanpa
+            lompat-lompat.
           </p>
         </div>
         {sb.scriptApproved ? (
@@ -174,7 +251,7 @@ export default function ScriptStep({
               value={projectName}
               disabled={isBusy}
               onChange={(e) => onRenameProject(e.target.value)}
-              placeholder="Contoh: Kopi Terakhir di Stasiun"
+              placeholder="Contoh: Subuh di Kampung Asing"
             />
           </div>
 
@@ -189,7 +266,7 @@ export default function ScriptStep({
               value={sb.idea}
               disabled={isBusy}
               onChange={(e) => onPatchSb({ idea: e.target.value })}
-              placeholder="Ceritakan ide bebas Anda: siapa tokohnya, di mana kejadiannya, dan apa yang terjadi dari awal sampai akhir..."
+              placeholder="Ceritakan ide bebas Anda: genre/suasana, tokoh utama, lokasi, dan perjalanan dari awal sampai akhir..."
             />
           </div>
 
@@ -236,9 +313,7 @@ export default function ScriptStep({
             </div>
           </div>
 
-          {selectedPreset ? (
-            <p className="fieldHint">{selectedPreset.summary}</p>
-          ) : null}
+          {selectedPreset ? <p className="fieldHint">{selectedPreset.summary}</p> : null}
 
           <details className="subtleDetails">
             <summary>Detail Prompt Gaya Visual (EN)</summary>
@@ -261,29 +336,170 @@ export default function ScriptStep({
             onClick={() => void handleGenerateScript()}
           >
             <SparklesIcon size={15} />
-            <span>{sb.scriptText.trim() ? "Generate Ulang Naskah (AI)" : "Generate Naskah dari Ide (AI)"}</span>
+            <span>{sb.scriptText.trim() ? "Generate Ulang Naskah Per-Segmen (AI)" : "Generate Naskah Per-Segmen (AI)"}</span>
           </button>
         </section>
 
-        {/* Right column: Editable Script & ACC Gate */}
-        <section className="panelCard scriptEditorCard" aria-label="Editor naskah lengkap">
+        {/* Right column: Segmented Script Editor & ACC Gate */}
+        <section className="panelCard scriptEditorCard" aria-label="Editor naskah per segmen">
           <div className="panelHead">
-            <h3>2. Naskah Lengkap (Bisa Diedit Langsung)</h3>
             <div className="metaInline">
-              {sceneCount > 0 ? <span className="metaTag mono">{sceneCount} adegan</span> : null}
+              <h3>2. Naskah Per-Segmen</h3>
+              {segments.length > 0 ? (
+                <span className="metaTag mono">
+                  {segments.length} segmen · ~{totalTargetPanels} panel
+                </span>
+              ) : null}
               <span className="metaTag mono">{wordCount} kata</span>
+            </div>
+
+            <div className="segToggle" role="tablist" aria-label="Tampilan editor naskah">
+              <button
+                type="button"
+                role="tab"
+                className="segBtn"
+                aria-selected={editorMode === "segments"}
+                onClick={() => setEditorMode("segments")}
+              >
+                Per Segmen ({segments.length})
+              </button>
+              <button
+                type="button"
+                role="tab"
+                className="segBtn"
+                aria-selected={editorMode === "raw"}
+                onClick={() => setEditorMode("raw")}
+              >
+                Teks Utuh
+              </button>
             </div>
           </div>
 
-          <textarea
-            id="sb-script-text"
-            aria-label="Isi naskah cerita"
-            className="textarea scriptTextarea"
-            value={sb.scriptText}
-            disabled={isBusy}
-            onChange={(e) => onPatchSb({ scriptText: e.target.value, scriptApproved: false })}
-            placeholder="Klik 'Generate Naskah dari Ide (AI)' di sebelah kiri, atau tempel/tulis langsung naskah cerita Anda di sini..."
-          />
+          {editorMode === "segments" ? (
+            segments.length === 0 ? (
+              <div className="segmentEmptyBox">
+                <p>
+                  Belum ada segmen naskah. Klik <strong>Generate Naskah Per-Segmen (AI)</strong> di sebelah kiri, atau
+                  buat segmen manual untuk mulai menulis.
+                </p>
+                <div className="actionGroup" style={{ justifyContent: "center" }}>
+                  <button
+                    type="button"
+                    className="btn btnSm"
+                    disabled={isBusy}
+                    onClick={handleAddSegment}
+                  >
+                    <PlusIcon size={14} />
+                    <span>Buat Segmen 1 Manual</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btnGhost btnSm"
+                    disabled={isBusy}
+                    onClick={() => setEditorMode("raw")}
+                  >
+                    Tempel Teks Utuh
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="scriptSegmentList">
+                {segments.map((seg) => (
+                  <article key={seg.id} className="scriptSegmentCard">
+                    <div className="scriptSegmentHead">
+                      <span className="frameIndexPill mono">
+                        SEGMEN {String(seg.index).padStart(2, "0")}
+                      </span>
+
+                      <div className="panelCountPicker" role="group" aria-label={`Target panel Segmen ${seg.index}`}>
+                        <span className="panelCountLabel">Target Panel:</span>
+                        {PANEL_COUNT_OPTIONS.map((cnt) => (
+                          <button
+                            key={cnt}
+                            type="button"
+                            className="panelCountBtn mono"
+                            data-active={seg.targetPanels === cnt}
+                            disabled={isBusy}
+                            onClick={() => handleUpdateSegment(seg.id, { targetPanels: cnt })}
+                            title={`Pecah Segmen ${seg.index} menjadi ${cnt} panel storyboard berurutan`}
+                          >
+                            {cnt}
+                          </button>
+                        ))}
+                      </div>
+
+                      {segments.length > 1 ? (
+                        <button
+                          type="button"
+                          className="btn btnDanger btnSm btnIcon"
+                          disabled={isBusy}
+                          title={`Hapus Segmen ${seg.index}`}
+                          aria-label={`Hapus Segmen ${seg.index}`}
+                          onClick={() => handleDeleteSegment(seg.id)}
+                        >
+                          <TrashIcon size={13} />
+                        </button>
+                      ) : null}
+                    </div>
+
+                    <div className="fieldRow">
+                      <input
+                        aria-label={`Judul Segmen ${seg.index}`}
+                        className="input inputSm"
+                        value={seg.title}
+                        disabled={isBusy}
+                        onChange={(e) => handleUpdateSegment(seg.id, { title: e.target.value })}
+                        placeholder={`Judul Segmen ${seg.index} (mis. Tiba di Pelabuhan)`}
+                      />
+                      <input
+                        aria-label={`Lokasi dan waktu Segmen ${seg.index}`}
+                        className="input inputSm"
+                        value={seg.locationHint}
+                        disabled={isBusy}
+                        onChange={(e) => handleUpdateSegment(seg.id, { locationHint: e.target.value })}
+                        placeholder="Lokasi / Waktu (mis. EXT. DERMAGA KAMPUNG - SUBUH)"
+                      />
+                    </div>
+
+                    <textarea
+                      aria-label={`Isi naskah Segmen ${seg.index}`}
+                      className="textarea scriptSegTextarea"
+                      value={seg.scriptContent}
+                      disabled={isBusy}
+                      onChange={(e) => handleUpdateSegment(seg.id, { scriptContent: e.target.value })}
+                      placeholder="Tulis rentetan aksi halus dalam segmen ini (4–6 momen berurutan agar mulus saat dijadikan panel storyboard)..."
+                    />
+                  </article>
+                ))}
+
+                <button
+                  type="button"
+                  className="btn btnSm addSegmentBtn"
+                  disabled={isBusy}
+                  onClick={handleAddSegment}
+                >
+                  <PlusIcon size={14} />
+                  <span>Tambah Segmen {segments.length + 1}</span>
+                </button>
+              </div>
+            )
+          ) : (
+            <>
+              <p className="fieldHint">
+                Gunakan header <code className="mono">SEGMEN 1 — Judul | EXT. LOKASI - WAKTU</code> (atau pisahkan
+                dengan baris kosong) agar otomatis terbagi menjadi segmen.
+              </p>
+              <textarea
+                id="sb-script-text"
+                aria-label="Isi naskah cerita utuh"
+                className="textarea scriptTextarea"
+                value={sb.scriptText}
+                disabled={isBusy}
+                onChange={(e) => handleRawScriptChange(e.target.value)}
+                placeholder="Klik 'Generate Naskah Per-Segmen (AI)' di sebelah kiri, atau tempel/tulis langsung naskah cerita Anda di sini..."
+              />
+            </>
+          )}
 
           {sb.scriptText.trim() ? (
             <div className="quickReviseRow">
@@ -299,7 +515,7 @@ export default function ScriptStep({
                     void handleReviseScript();
                   }
                 }}
-                placeholder="Revisi cepat via AI (mis. perjelas baju tokoh, ubah lokasi jadi kafe sore)..."
+                placeholder="Revisi cepat via AI (mis. perjelas urutan gerak di Segmen 2, tambah detail pakaian)..."
               />
               <button
                 type="button"
@@ -314,7 +530,7 @@ export default function ScriptStep({
 
           <div className="stepFooterBar">
             <p className="fieldHint" style={{ margin: 0 }}>
-              Pastikan tokoh, pakaian, dan tempat di naskah sudah sesuai sebelum mengekstrak aset.
+              Setiap segmen siap dipecah menjadi 4–7 panel storyboard berurutan setelah Aset &amp; Karakter di-ACC.
             </p>
             <div className="actionGroup">
               {sb.assets.length > 0 ? (
@@ -325,14 +541,19 @@ export default function ScriptStep({
                     disabled={isBusy || !sb.scriptText.trim()}
                     onClick={() => void onApproveAndExtractAssets()}
                   >
-                    Ekstrak Ulang Aset dari Naskah
+                    Ekstrak Ulang Aset
                   </button>
                   <button
                     type="button"
                     className="btn btnPrimary"
                     disabled={isBusy || !sb.scriptText.trim()}
                     onClick={() => {
-                      onPatchSb({ scriptApproved: true, step: "assets" });
+                      onPatchSb({
+                        segments,
+                        scriptText: sb.scriptText.trim() || formatSegmentsToScript(segments),
+                        scriptApproved: true,
+                        step: "assets",
+                      });
                       onGoToAssets();
                     }}
                   >
