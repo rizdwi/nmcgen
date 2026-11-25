@@ -20,13 +20,14 @@ export function getServerSupabaseConfig(): SupabaseConfig | null {
 }
 
 export function projectToSupabaseRow(project: NmcProject) {
+  const sb = project.storyboard;
   const script = getPrimaryScript(project);
   return {
     id: project.id,
     name: project.name || "Proyek Baru",
-    aspect_ratio: script?.aspectRatio ?? "16:9",
-    visual_style: script?.visualStyle ?? "",
-    premise: script?.premise ?? "",
+    aspect_ratio: sb?.aspectRatio ?? script?.aspectRatio ?? "16:9",
+    visual_style: sb?.visualStyle ?? script?.visualStyle ?? "",
+    premise: sb?.idea ?? script?.premise ?? "",
     updated_at: project.updatedAt,
     data: project,
   };

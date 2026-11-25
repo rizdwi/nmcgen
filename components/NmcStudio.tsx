@@ -1,34 +1,30 @@
 "use client";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  CanvasNode,
   NmcProject,
   NmcSettings,
-  NodeKind,
-  RenderReceipt,
   RuntimeStatus,
-  ScriptNodeData,
-  SegmentNodeData,
+  StoryboardData,
+  StoryboardStep as StepKey,
 } from "@/lib/types";
-import {
-  canConnect,
-  createDefaultNode,
-  createStarterProject,
-  NODE_META,
-  uid,
-} from "@/lib/presets";
-import { downloadBlob, loadSettings, projectDb, saveSettings } from "@/lib/storage";
+import { uid } from "@/lib/presets";
+import { callAi, downloadBlob, loadSettings, projectDb, saveSettings } from "@/lib/storage";
 import { cloudDb, mergeProjects } from "@/lib/supabaseSync";
-import { autoArrangeNodes, updateProjectMeta, validateProject } from "@/lib/validator";
-import CanvasBoard from "./CanvasBoard";
-import InspectorDrawer from "./InspectorDrawer";
-import PipelineModal from "./PipelineModal";
+import { updateProjectMeta } from "@/lib/validator";
+import {
+  buildExtractAssetsFromScriptPrompt,
+  countApprovedAssets,
+  createStoryboardProject,
+  ensureStoryboard,
+  getSelectedAssetImage,
+  parseExtractedStoryAssets,
+} from "@/lib/storyboard";
+import AssetsStep from "./AssetsStep";
 import ProjectDashboard, { type ProjectMetaDraft } from "./ProjectDashboard";
+import ScriptStep from "./ScriptStep";
 import SettingsModal from "./SettingsModal";
-import ToonflowModal from "./ToonflowModal";
-import { CheckIcon, DashboardIcon, NodeKindIcon, PlusIcon, SlidersIcon } from "./Icons";
-
-const STAGE_ORDER: NodeKind[] = ["script", "asset", "segment", "audio", "assembly", "export"];
+import StoryboardStep from "./StoryboardStep";
+import { CheckIcon, DashboardIcon, SlidersIcon } from "./Icons";
 
 export default function NmcStudio() {
   const [screen, setScreen] = useState<"dashboard" | "studio">("dashboard");
@@ -38,16 +34,11 @@ export default function NmcStudio() {
   const [projects, setProjects] = useState<NmcProject[]>([]);
   const [project, setProject] = useState<NmcProject | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"canvas" | "list">("canvas");
-  const [toonflowOpen, setToonflowOpen] = useState(false);
-  const [toonflowAutoStart, setToonflowAutoStart] = useState(false);
-  const [pipelineOpen, setPipelineOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const [loadError, setLoadError] = useState("");
-  const importRef = useRef<HTMLInputElement>(null);
+  const [stepNotice, setStepNotice] = useState("");
+  const [globalBusy, setGlobalBusy] = useState("");
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestProjectRef = useRef<NmcProject | null>(null);
 
@@ -74,9 +65,6 @@ export default function NmcStudio() {
   }, []);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && window.innerWidth < 768) {
-      setViewMode("list");
-    }
     const loadedSettings = loadSettings();
     setSettings(loadedSettings);
     void refreshRuntime();
@@ -90,11 +78,10 @@ export default function NmcStudio() {
 
         setSupabaseConnected(remoteRes.connected);
         if (remoteRes.error) {
-          setLoadError(`Sinkronisasi Supabase terkendala (${remoteRes.error}). Menampilkan data lokal.`);
+          setLoadError(`Sinkronisasi cloud terkendala (${remoteRes.error}). Menampilkan data lokal.`);
         }
 
         const merged = mergeProjects(localList, remoteRes.projects);
-        // Persist newer remote projects back to IndexedDB for offline resilience.
         const localMap = new Map(localList.map((p) => [p.id, p]));
         for (const remote of remoteRes.projects) {
           const cur = localMap.get(remote.id);
@@ -106,7 +93,6 @@ export default function NmcStudio() {
         const chosen = merged.find((x) => x.id === loadedSettings.lastProjectId) ?? merged[0] ?? null;
         setProjects(merged);
         setProject(chosen);
-        setSelectedNodeId(chosen?.nodes[0]?.id ?? null);
       } catch (err) {
         setLoadError(`Gagal memuat daftar proyek: ${(err as Error).message}`);
         setProjects([]);
@@ -131,9 +117,7 @@ export default function NmcStudio() {
     const cloud = await cloudDb.put(next);
     if (cloud.connected) {
       setSupabaseConnected(true);
-      if (!cloud.ok) {
-        throw new Error(cloud.error || "Gagal menyimpan ke Supabase");
-      }
+      if (!cloud.ok) throw new Error(cloud.error || "Gagal menyimpan ke Supabase");
     }
   }, []);
 
@@ -142,6 +126,7 @@ export default function NmcStudio() {
       setProject((prev) => {
         if (!prev) return prev;
         const next: NmcProject = { ...updater(prev), updatedAt: Date.now() };
+        latestProjectRef.current = next;
         setProjects((list) => {
           const idx = list.findIndex((p) => p.id === next.id);
           if (idx === -1) return [next, ...list];
@@ -162,19 +147,19 @@ export default function NmcStudio() {
     [persistProject],
   );
 
-  const report = useMemo(() => (project ? validateProject(project) : null), [project]);
-
-  const issuesByNode = useMemo(() => {
-    const map = new Map<string, NonNullable<typeof report>["errors"]>();
-    if (!report) return map;
-    for (const issue of [...report.errors, ...report.warnings]) {
-      if (!issue.nodeId) continue;
-      const arr = map.get(issue.nodeId) ?? [];
-      arr.push(issue);
-      map.set(issue.nodeId, arr);
-    }
-    return map;
-  }, [report]);
+  const patchStoryboard = useCallback(
+    (patch: Partial<StoryboardData>) => {
+      commitProject((prev) => {
+        const currentSb = ensureStoryboard(prev);
+        return {
+          ...prev,
+          schemaVersion: 2,
+          storyboard: { ...currentSb, ...patch },
+        };
+      });
+    },
+    [commitProject],
+  );
 
   const flushPendingSave = useCallback(() => {
     if (saveTimer.current) {
@@ -192,18 +177,19 @@ export default function NmcStudio() {
   const handleOpenProjectFromDashboard = (id: string) => {
     const found = projects.find((p) => p.id === id);
     if (!found) return;
-    setProject(found);
-    setSelectedNodeId(found.nodes[0]?.id ?? null);
-    setSelectedEdgeId(null);
+    // Normalize into schema v2 storyboard cleanly on open
+    const normalized: NmcProject = found.storyboard
+      ? found
+      : { ...found, schemaVersion: 2, storyboard: ensureStoryboard(found) };
+    setProject(normalized);
+    setStepNotice("");
     setScreen("studio");
-    updateSettings((s) => ({ ...s, lastProjectId: found.id }));
+    updateSettings((s) => ({ ...s, lastProjectId: normalized.id }));
   };
 
   const handleBackToDashboard = () => {
     flushPendingSave();
-    setToonflowOpen(false);
-    setPipelineOpen(false);
-    setSelectedEdgeId(null);
+    setStepNotice("");
     setProjects((prev) => [...prev].sort((a, b) => b.updatedAt - a.updatedAt));
     setScreen("dashboard");
   };
@@ -212,47 +198,26 @@ export default function NmcStudio() {
     flushPendingSave();
     const found = projects.find((p) => p.id === id);
     if (!found) return;
-    setProject(found);
-    setSelectedNodeId(found.nodes[0]?.id ?? null);
-    setSelectedEdgeId(null);
-    updateSettings((s) => ({ ...s, lastProjectId: found.id }));
+    const normalized: NmcProject = found.storyboard
+      ? found
+      : { ...found, schemaVersion: 2, storyboard: ensureStoryboard(found) };
+    setProject(normalized);
+    setStepNotice("");
+    updateSettings((s) => ({ ...s, lastProjectId: normalized.id }));
   };
 
-  const handleNewProject = async () => {
-    flushPendingSave();
-    const fresh = createStarterProject(`Proyek ${projects.length + 1}`);
-    await persistProject(fresh).catch(() => {});
-    setProjects((prev) => [fresh, ...prev]);
-    setProject(fresh);
-    setSelectedNodeId(fresh.nodes[0]?.id ?? null);
-    setSelectedEdgeId(null);
-    updateSettings((s) => ({ ...s, lastProjectId: fresh.id }));
-  };
-
-  const handleCreateProjectFromDashboard = async (
-    meta: ProjectMetaDraft,
-    openAfter: boolean,
-    autoGenerate = false,
-  ) => {
-    const fresh = createStarterProject(meta.name.trim() || `Proyek ${projects.length + 1}`, {
+  const handleCreateProjectFromDashboard = async (meta: ProjectMetaDraft) => {
+    const fresh = createStoryboardProject(meta.name.trim() || `Storyboard ${projects.length + 1}`, {
       aspectRatio: meta.aspectRatio,
       visualStyle: meta.visualStyle,
-      premise: meta.premise,
-      maxSegmentSec: meta.maxSegmentSec,
+      idea: meta.premise,
     });
     await persistProject(fresh);
     setProjects((prev) => [fresh, ...prev]);
-    if (openAfter) {
-      setProject(fresh);
-      setSelectedNodeId(fresh.nodes[0]?.id ?? null);
-      setSelectedEdgeId(null);
-      setScreen("studio");
-      updateSettings((s) => ({ ...s, lastProjectId: fresh.id }));
-      if (autoGenerate) {
-        setToonflowAutoStart(true);
-        setToonflowOpen(true);
-      }
-    }
+    setProject(fresh);
+    setStepNotice("");
+    setScreen("studio");
+    updateSettings((s) => ({ ...s, lastProjectId: fresh.id }));
   };
 
   const handleUpdateProjectMeta = async (projectId: string, meta: ProjectMetaDraft) => {
@@ -282,26 +247,15 @@ export default function NmcStudio() {
     if (project?.id === projectId) {
       const nextProj = remaining[0] ?? null;
       setProject(nextProj);
-      setSelectedNodeId(nextProj?.nodes[0]?.id ?? null);
-      setSelectedEdgeId(null);
       if (!nextProj) setScreen("dashboard");
     }
-  };
-
-  const handleInitStarterIntoCurrent = () => {
-    const starter = createStarterProject(project?.name || "Proyek Baru");
-    commitProject((prev) => ({
-      ...starter,
-      id: prev.id,
-      name: prev.name,
-    }));
-    setSelectedNodeId(starter.nodes[0]?.id ?? null);
   };
 
   const handleExportJson = () => {
     if (!project) return;
     const safeName =
-      (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") + ".nmcgen.json";
+      (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
+      ".nmcgen.json";
     downloadBlob(new Blob([JSON.stringify(project, null, 2)], { type: "application/json" }), safeName);
   };
 
@@ -311,20 +265,26 @@ export default function NmcStudio() {
     try {
       const text = await file.text();
       const parsed = JSON.parse(text) as NmcProject;
-      if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
-        throw new Error("Format JSON tidak sesuai skema proyek nmcGen.");
+      if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.storyboard)) {
+        throw new Error("Format JSON tidak sesuai proyek nmcGen.");
       }
-      const imported: NmcProject = {
+      const importedBase: NmcProject = {
         ...parsed,
         id: uid(),
         name: parsed.name || file.name.replace(/\.json$/i, ""),
         updatedAt: Date.now(),
-        viewport: parsed.viewport || { x: 40, y: 40, zoom: 0.85 },
+        nodes: Array.isArray(parsed.nodes) ? parsed.nodes : [],
+        edges: Array.isArray(parsed.edges) ? parsed.edges : [],
+        viewport: parsed.viewport || { x: 0, y: 0, zoom: 1 },
+      };
+      const imported: NmcProject = {
+        ...importedBase,
+        schemaVersion: 2,
+        storyboard: ensureStoryboard(importedBase),
       };
       await persistProject(imported).catch(() => {});
       setProjects((prev) => [imported, ...prev]);
       setProject(imported);
-      setSelectedNodeId(imported.nodes[0]?.id ?? null);
       setLoadError("");
     } catch (err) {
       setLoadError(`Gagal mengimpor proyek: ${(err as Error).message}`);
@@ -333,220 +293,34 @@ export default function NmcStudio() {
     }
   };
 
-  const handleAddNode = (kind: NodeKind) => {
-    if (!project) return;
-    const sameKindCount = project.nodes.filter((n) => n.kind === kind).length;
-    const baseCol: Record<NodeKind, number> = {
-      script: 40,
-      asset: 380,
-      segment: 750,
-      audio: 750,
-      assembly: 1130,
-      export: 1470,
-    };
-    const x = baseCol[kind];
-    const y = 40 + sameKindCount * 210;
-    const created = createDefaultNode(kind, x, y, sameKindCount + 1);
-    commitProject((prev) => ({
-      ...prev,
-      nodes: [...prev.nodes, created],
-    }));
-    setSelectedNodeId(created.id);
-  };
-
-  const handleMoveNode = useCallback(
-    (id: string, x: number, y: number) => {
-      commitProject((prev) => ({
+  const handleSyncDiscoveredModels = useCallback(
+    (profileId: string, discovered: { textModels: string[]; imageModels: string[]; fetchedAt: number }) => {
+      updateSettings((prev) => ({
         ...prev,
-        nodes: prev.nodes.map((n) => (n.id === id ? { ...n, x, y } : n)),
+        profiles: prev.profiles.map((p) =>
+          p.id === profileId
+            ? {
+                ...p,
+                discoveredTextModels: discovered.textModels,
+                discoveredImageModels: discovered.imageModels,
+                modelsSyncedAt: discovered.fetchedAt,
+              }
+            : p,
+        ),
       }));
     },
-    [commitProject],
-  );
-
-  const handleConnect = useCallback(
-    (sourceId: string, targetId: string) => {
-      commitProject((prev) => {
-        if (sourceId === targetId) return prev;
-        const src = prev.nodes.find((n) => n.id === sourceId);
-        const dst = prev.nodes.find((n) => n.id === targetId);
-        if (!src || !dst || !canConnect(src.kind, dst.kind)) return prev;
-        if (prev.edges.some((e) => e.source === sourceId && e.target === targetId)) return prev;
-        return {
-          ...prev,
-          edges: [...prev.edges, { id: uid(), source: sourceId, target: targetId }],
-        };
-      });
-    },
-    [commitProject],
-  );
-
-  const handleDeleteEdge = useCallback(
-    (edgeId: string) => {
-      commitProject((prev) => ({
-        ...prev,
-        edges: prev.edges.filter((e) => e.id !== edgeId),
-      }));
-      setSelectedEdgeId((prev) => (prev === edgeId ? null : prev));
-    },
-    [commitProject],
-  );
-
-  const handleDeleteNode = useCallback(
-    (nodeId: string) => {
-      commitProject((prev) => ({
-        ...prev,
-        nodes: prev.nodes.filter((n) => n.id !== nodeId),
-        edges: prev.edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
-      }));
-      setSelectedNodeId((prev) => (prev === nodeId ? null : prev));
-    },
-    [commitProject],
-  );
-
-  const handleSyncBeatsToSegments = useCallback(
-    (scriptNodeId: string) => {
-      commitProject((prev) => {
-        const scriptNode = prev.nodes.find((n) => n.id === scriptNodeId);
-        if (!scriptNode || scriptNode.data.kind !== "script") return prev;
-        const sd = scriptNode.data as ScriptNodeData;
-        if (!sd.beats.length) return prev;
-
-        const maxDur = Math.max(4, sd.maxSegmentSec || 15);
-        const hasStructuredStages = sd.beats.some((b) => Boolean(b.stage?.trim()));
-        const groups: typeof sd.beats[] = [];
-
-        if (hasStructuredStages) {
-          for (const beat of sd.beats) groups.push([beat]);
-        } else {
-          let cur: typeof sd.beats = [];
-          let curDur = 0;
-          for (const beat of sd.beats) {
-            const bDur = Math.max(1, beat.durationSec || 4);
-            if (cur.length > 0 && curDur + bDur > maxDur) {
-              groups.push(cur);
-              cur = [beat];
-              curDur = bDur;
-            } else {
-              cur.push(beat);
-              curDur += bDur;
-            }
-          }
-          if (cur.length) groups.push(cur);
-        }
-
-        const existingCount = prev.nodes.filter((n) => n.kind === "segment").length;
-        const assets = prev.nodes.filter((n) => n.kind === "asset");
-        let asmNode = prev.nodes.find((n) => n.kind === "assembly");
-        const addedNodes: CanvasNode[] = [];
-        const addedEdges = [...prev.edges];
-
-        if (!asmNode) {
-          asmNode = createDefaultNode("assembly", 1130, 180, 1);
-          addedNodes.push(asmNode);
-        }
-
-        const defaultShots: SegmentNodeData["shotSize"][] = ["WS", "MS", "MCU", "CU", "WS"];
-        const defaultAngles: SegmentNodeData["cameraAngle"][] = ["Front", "Side 90", "Low", "Rear 3/4", "High"];
-        const defaultMotions: SegmentNodeData["cameraMotion"][] = [
-          "Push-In",
-          "Pan Right",
-          "Push-In",
-          "Pull-Out",
-          "Pull-Out",
-        ];
-
-        groups.forEach((grp, idx) => {
-          const segNum = existingCount + idx + 1;
-          const totalSec = grp.reduce((s, b) => s + (b.durationSec || 4), 0);
-          const primary = grp[0];
-          const stage = primary?.stage?.trim() || "";
-          let cursor = 0;
-          const tlLines = grp.map((b) => {
-            const start = cursor;
-            cursor += b.durationSec || 4;
-            return `[0:${String(start).padStart(2, "0")}-0:${String(cursor).padStart(2, "0")}] ${b.summary}`;
-          });
-          const dialogue = grp.map((b) => b.dialogue.trim()).filter(Boolean).join(" ");
-          const continuityLock = grp
-            .map((b) => (b.continuityLock || "").trim())
-            .filter(Boolean)
-            .join("; ");
-          const visualPrompt = grp
-            .map((b) => (b.visualPrompt || "").trim())
-            .filter(Boolean)
-            .join(" ");
-
-          const code = `G${String(segNum).padStart(2, "0")}`;
-          const node = createDefaultNode("segment", 750, 48 + (segNum - 1) * 250, segNum);
-          node.title = stage ? `${code}: ${stage}` : `Segmen ${code}`;
-          node.data = {
-            ...(node.data as SegmentNodeData),
-            code,
-            storyStage: stage || undefined,
-            durationSec: Math.min(maxDur, totalSec),
-            shotSize: primary?.shotSize ?? defaultShots[idx % defaultShots.length],
-            cameraAngle: primary?.cameraAngle ?? defaultAngles[idx % defaultAngles.length],
-            cameraMotion: primary?.cameraMotion ?? defaultMotions[idx % defaultMotions.length],
-            timelineText: tlLines.join("\n"),
-            dialogue,
-            continuityLock,
-            visualPrompt: visualPrompt || undefined,
-          };
-          addedNodes.push(node);
-
-          // Wire only assets referenced by @tag or name in this beat; fall back to all assets if none matched.
-          const beatCorpus = `${tlLines.join(" ")} ${dialogue} ${continuityLock} ${visualPrompt}`.toLowerCase();
-          const matchedAssets = assets.filter((a) => {
-            if (a.data.kind !== "asset") return false;
-            const tag = a.data.tag.toLowerCase();
-            const cleanTag = tag.replace(/^@/, "");
-            return (tag && beatCorpus.includes(tag)) || (cleanTag.length >= 3 && beatCorpus.includes(cleanTag));
-          });
-          const wireAssets = matchedAssets.length > 0 ? matchedAssets : assets;
-          for (const asset of wireAssets) {
-            addedEdges.push({ id: uid(), source: asset.id, target: node.id });
-          }
-          addedEdges.push({ id: uid(), source: node.id, target: asmNode!.id });
-        });
-
-        return {
-          ...prev,
-          nodes: [...prev.nodes, ...addedNodes],
-          edges: addedEdges,
-        };
-      });
-    },
-    [commitProject],
-  );
-
-  const handleSaveReceipt = useCallback(
-    (receipt: RenderReceipt) => {
-      commitProject((prev) => {
-        const hasExp = prev.nodes.some((n) => n.kind === "export");
-        if (!hasExp) return prev;
-        return {
-          ...prev,
-          nodes: prev.nodes.map((n) =>
-            n.data.kind === "export"
-              ? { ...n, data: { ...n.data, lastRender: receipt } }
-              : n,
-          ),
-        };
-      });
-    },
-    [commitProject],
+    [updateSettings],
   );
 
   if (!settings) {
     return (
       <main className="studioShell" style={{ placeItems: "center" }}>
-        <p style={{ color: "var(--ink-muted)" }}>Memuat ruang kerja nmcGen...</p>
+        <p style={{ color: "var(--ink-muted)" }}>Memuat nmcGen Storyboard Studio...</p>
       </main>
     );
   }
 
-  if (screen === "dashboard" || !project || !report) {
+  if (screen === "dashboard" || !project) {
     return (
       <>
         <ProjectDashboard
@@ -574,14 +348,82 @@ export default function NmcStudio() {
     );
   }
 
-  const selectedNode = project.nodes.find((n) => n.id === selectedNodeId) ?? null;
+  const sb = ensureStoryboard(project);
   const textProfile =
     settings.profiles.find((p) => p.id === settings.textProfileId) ?? settings.profiles[0];
   const imageProfile =
     settings.profiles.find((p) => p.id === settings.imageProfileId) ?? settings.profiles[0];
+  const assetCounts = countApprovedAssets(sb);
+
+  // Strict Step 1 -> Step 2 transition: extracts ONLY assets physically present in the entire script
+  const handleExtractAssetsFromScript = async () => {
+    const curProj = latestProjectRef.current ?? project;
+    const curSb = ensureStoryboard(curProj);
+    if (!curSb.scriptText.trim()) {
+      setStepNotice("Tulis atau generate naskah terlebih dahulu di Tahap 1.");
+      return;
+    }
+    setStepNotice("");
+    setGlobalBusy("Membaca seluruh naskah & mengekstrak karakter, lokasi, dan properti yang dibutuhkan...");
+    patchStoryboard({ scriptApproved: true, step: "assets" });
+    try {
+      const built = buildExtractAssetsFromScriptPrompt({
+        projectName: curProj.name,
+        scriptText: curSb.scriptText,
+        visualStyle: curSb.visualStyle,
+      });
+      const res = await callAi(textProfile, "text", built);
+      if (res.discovered) handleSyncDiscoveredModels(textProfile.id, res.discovered);
+      if (!res.ok || !res.text) {
+        throw new Error(res.error || "Gagal mengekstrak aset dari naskah.");
+      }
+      const extracted = parseExtractedStoryAssets(res.text);
+      patchStoryboard({
+        scriptApproved: true,
+        assets: extracted,
+        assetsApproved: false,
+        step: "assets",
+      });
+    } catch (err) {
+      setStepNotice(`Ekstraksi aset gagal: ${(err as Error).message}`);
+    } finally {
+      setGlobalBusy("");
+    }
+  };
+
+  const handleApproveAllAndGoStoryboard = () => {
+    const curSb = ensureStoryboard(latestProjectRef.current ?? project);
+    const updatedAssets = curSb.assets.map((a) =>
+      getSelectedAssetImage(a) ? { ...a, approved: true } : a,
+    );
+    const anyApproved = updatedAssets.some((a) => a.approved);
+    if (!anyApproved) {
+      setStepNotice("Generate atau unggah gambar minimal 1 aset terlebih dahulu sebelum masuk Storyboard.");
+      return;
+    }
+    setStepNotice("");
+    patchStoryboard({
+      assets: updatedAssets,
+      assetsApproved: updatedAssets.every((a) => a.approved),
+      step: "storyboard",
+    });
+  };
+
+  const handleNavigateStep = (target: StepKey) => {
+    setStepNotice("");
+    if (target === "assets" && !sb.scriptText.trim()) {
+      setStepNotice("Tulis atau generate naskah dulu di Tahap 1 sebelum masuk ke Aset & Karakter.");
+      return;
+    }
+    if (target === "storyboard" && assetCounts.approved === 0 && sb.frames.length === 0) {
+      setStepNotice("Generate dan beri ACC pada Aset & Karakter dulu di Tahap 2 agar Storyboard mengacu pada aset yang sudah ACC.");
+      return;
+    }
+    patchStoryboard({ step: target });
+  };
 
   return (
-    <div className="studioShell">
+    <div className="studioShell storyboardShell">
       <header className="topBar">
         <div className="topLeft">
           <button
@@ -596,330 +438,165 @@ export default function NmcStudio() {
             <h1 className="brandTitle">nmcGen</h1>
           </button>
 
-          <button
-            type="button"
-            className="btn btnSm"
-            onClick={handleBackToDashboard}
-            title="Kembali ke daftar kartu proyek"
-          >
+          <button type="button" className="btn btnSm" onClick={handleBackToDashboard}>
             <DashboardIcon size={14} />
             <span>Dashboard</span>
           </button>
 
-          <div className="projectSelectWrap">
-            <label htmlFor="project-select" className="srOnly">
-              Pilih proyek
-            </label>
-            <select
-              id="project-select"
-              className="projectSelect"
-              value={project.id}
-              onChange={(e) => handleSwitchProject(e.target.value)}
-            >
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <button type="button" className="btn btnSm" onClick={handleNewProject} title="Buat proyek kosong baru">
-              <PlusIcon size={13} />
-              <span>Baru</span>
-            </button>
-            <button
-              type="button"
-              className="btn btnGhost btnSm"
-              onClick={handleExportJson}
-              title="Ekspor file JSON proyek"
-            >
-              JSON
-            </button>
-            <button
-              type="button"
-              className="btn btnGhost btnSm"
-              onClick={() => importRef.current?.click()}
-              title="Impor file JSON proyek"
-            >
-              Impor
-            </button>
-            <input
-              ref={importRef}
-              type="file"
-              accept="application/json,.json"
-              className="srOnly"
-              onChange={handleImportJson}
-            />
-          </div>
+          <select
+            aria-label="Pilih proyek"
+            className="projectSelect"
+            value={project.id}
+            onChange={(e) => handleSwitchProject(e.target.value)}
+          >
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
         </div>
 
-        <nav className="topCenter" aria-label="Mode tampilan">
-          <div className="segToggle" role="group" aria-label="Pilih tampilan kanvas atau daftar alur">
-            <button
-              type="button"
-              className="segBtn"
-              aria-pressed={viewMode === "canvas"}
-              onClick={() => setViewMode("canvas")}
-            >
-              Kanvas
-            </button>
-            <button
-              type="button"
-              className="segBtn"
-              aria-pressed={viewMode === "list"}
-              onClick={() => setViewMode("list")}
-            >
-              Alur List
-            </button>
-          </div>
-
-          <span
-            className="runtimePill"
-            data-ready={runtime?.mode === "local-hybrid" || Boolean(runtime?.workersAiBinding)}
-            title="Status runtime server dan Cloudflare Workers AI"
+        {/* Center: Clean 3-Step Linear Stepper */}
+        <nav className="stepperNav" aria-label="Tahapan Storyboard">
+          <button
+            type="button"
+            className="stepperBtn"
+            data-active={sb.step === "script"}
+            data-done={sb.scriptApproved && Boolean(sb.scriptText.trim())}
+            onClick={() => handleNavigateStep("script")}
           >
-            {runtime === null
-              ? "Mengecek runtime..."
-              : runtime.mode === "local-hybrid"
-                ? "Lokal: FFmpeg Siap"
-                : runtime.workersAiBinding
-                  ? "Cloudflare Workers AI"
-                  : "Mode Web Hybrid"}
+            <span className="stepperNum mono">
+              {sb.scriptApproved && sb.scriptText.trim() ? <CheckIcon size={11} /> : "1"}
+            </span>
+            <span>Naskah</span>
+          </button>
+
+          <span className="stepperArrow" aria-hidden="true">
+            →
           </span>
+
+          <button
+            type="button"
+            className="stepperBtn"
+            data-active={sb.step === "assets"}
+            data-done={assetCounts.total > 0 && assetCounts.approved === assetCounts.total}
+            onClick={() => handleNavigateStep("assets")}
+          >
+            <span className="stepperNum mono">
+              {assetCounts.total > 0 && assetCounts.approved === assetCounts.total ? (
+                <CheckIcon size={11} />
+              ) : (
+                "2"
+              )}
+            </span>
+            <span>
+              Aset &amp; Karakter
+              {assetCounts.total > 0 ? ` (${assetCounts.approved}/${assetCounts.total})` : ""}
+            </span>
+          </button>
+
+          <span className="stepperArrow" aria-hidden="true">
+            →
+          </span>
+
+          <button
+            type="button"
+            className="stepperBtn"
+            data-active={sb.step === "storyboard"}
+            data-done={sb.frames.length > 0 && sb.frames.every((f) => f.approved)}
+            data-locked={assetCounts.approved === 0 && sb.frames.length === 0}
+            onClick={() => handleNavigateStep("storyboard")}
+          >
+            <span className="stepperNum mono">3</span>
+            <span>Storyboard{sb.frames.length > 0 ? ` (${sb.frames.length})` : ""}</span>
+          </button>
         </nav>
 
         <div className="topRight">
-          <span style={{ fontSize: 12, color: "var(--ink-muted)" }} aria-live="polite">
+          <span className="saveStateText" aria-live="polite">
             {saveState === "saving"
               ? "Menyimpan..."
               : saveState === "error"
                 ? "Gagal sinkron"
                 : supabaseConnected
-                  ? "Tersimpan (Cloud)"
-                  : "Tersimpan (Lokal)"}
+                  ? "Tersimpan"
+                  : "Lokal"}
           </span>
-          <button
-            type="button"
-            className="btn btnPrimary btnSm"
-            onClick={() => {
-              setToonflowAutoStart(false);
-              setToonflowOpen(true);
-            }}
-            title="Generate seluruh pipeline AI (Toonflow) sampai video jadi"
-          >
-            <span>Generate AI (1 Klik)</span>
+          <button type="button" className="btn btnGhost btnSm" onClick={handleExportJson} title="Backup JSON proyek">
+            JSON
           </button>
           <button
             type="button"
             className="btn btnSm"
             onClick={() => setSettingsOpen(true)}
-            aria-label="Pengaturan AI dan Runtime"
+            aria-label="Pengaturan AI"
           >
             <SlidersIcon size={14} />
-            <span>Pengaturan</span>
-          </button>
-          <button
-            type="button"
-            className="btn btnPrimary btnSm"
-            onClick={() => setPipelineOpen(true)}
-          >
-            <CheckIcon size={14} />
-            <span>
-              Cek &amp; Render ({report.errors.length > 0 ? `${report.errors.length} err` : `${report.totalDurationSec}s`})
-            </span>
+            <span>{imageProfile.kind === "CloudflareAI" ? "Cloudflare 4B" : imageProfile.name}</span>
           </button>
         </div>
       </header>
 
-      {loadError ? (
-        <div className="alertBox" data-tone="error" role="alert" style={{ margin: "8px 14px 0" }}>
-          {loadError}
-        </div>
-      ) : null}
-
-      <main className="workspaceGrid" data-inspector-open={Boolean(selectedNode)}>
-        {viewMode === "canvas" ? (
-          <CanvasBoard
-            project={project}
-            selectedNodeId={selectedNodeId}
-            selectedEdgeId={selectedEdgeId}
-            issuesByNode={issuesByNode}
-            onSelectNode={setSelectedNodeId}
-            onSelectEdge={setSelectedEdgeId}
-            onMoveNode={handleMoveNode}
-            onConnect={handleConnect}
-            onDeleteEdge={handleDeleteEdge}
-            onViewportChange={(viewport) => commitProject((prev) => ({ ...prev, viewport }))}
-            onAddNode={handleAddNode}
-            onAutoArrange={() => commitProject((prev) => ({ ...prev, nodes: autoArrangeNodes(prev) }))}
-            onInitStarter={handleInitStarterIntoCurrent}
-          />
-        ) : (
-          <div className="listStage" role="region" aria-label="Daftar tahap produksi nmcGen">
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "1 1 200px" }}>
-                <label htmlFor="proj-name-inline" className="srOnly">
-                  Nama proyek
-                </label>
-                <input
-                  id="proj-name-inline"
-                  className="input"
-                  value={project.name}
-                  onChange={(e) => commitProject((prev) => ({ ...prev, name: e.target.value }))}
-                />
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {project.nodes.length === 0 ? (
-                  <button type="button" className="btn btnPrimary btnSm" onClick={handleInitStarterIntoCurrent}>
-                    Buat Alur Dasar
-                  </button>
-                ) : null}
-                <button type="button" className="btn btnSm" onClick={handleBackToDashboard}>
-                  <DashboardIcon size={14} />
-                  <span>Kelola di Dashboard</span>
-                </button>
-              </div>
+      <main className="studioMainScroll">
+        {loadError ? (
+          <div className="stepNoticeWrap">
+            <div className="alertBox" data-tone="error" role="alert">
+              {loadError}
             </div>
-
-            {STAGE_ORDER.map((kind) => {
-              const stageNodes = project.nodes.filter((n) => n.kind === kind);
-              return (
-                <section key={kind} className="stageSection">
-                  <div className="stageHeading">
-                    <h2 style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <NodeKindIcon kind={kind} size={15} />
-                      <span>
-                        {NODE_META[kind].stage}: {NODE_META[kind].label}
-                      </span>
-                    </h2>
-                    <button type="button" className="btn btnSm" onClick={() => handleAddNode(kind)}>
-                      + Tambah
-                    </button>
-                  </div>
-                  {stageNodes.length === 0 ? (
-                    <p style={{ margin: 0, fontSize: 12, color: "var(--ink-muted)" }}>
-                      Belum ada node pada tahap ini. Klik + Tambah untuk membuatnya.
-                    </p>
-                  ) : (
-                    <div className="listCards">
-                      {stageNodes.map((n) => {
-                        const nodeIssues = issuesByNode.get(n.id) ?? [];
-                        return (
-                          <button
-                            key={n.id}
-                            type="button"
-                            className="listCardBtn"
-                            data-selected={selectedNodeId === n.id}
-                            onClick={() => setSelectedNodeId(n.id)}
-                          >
-                            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, width: "100%" }}>
-                              <strong style={{ fontSize: 13 }}>{n.title}</strong>
-                              {nodeIssues.length > 0 ? (
-                                <span
-                                  className="metaTag"
-                                  data-tone={nodeIssues.some((i) => i.severity === "error") ? "error" : "warn"}
-                                >
-                                  {nodeIssues.length} cek
-                                </span>
-                              ) : (
-                                <span className="metaTag" data-tone="ok">
-                                  Siap
-                                </span>
-                              )}
-                            </div>
-                            <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
-                              {NODE_META[n.kind].hint}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
-              );
-            })}
           </div>
-        )}
+        ) : null}
 
-        {selectedNode ? (
-          <InspectorDrawer
-            project={project}
-            node={selectedNode}
+        {stepNotice ? (
+          <div className="stepNoticeWrap">
+            <div className="alertBox" data-tone="warn" role="alert">
+              {stepNotice}
+            </div>
+          </div>
+        ) : null}
+
+        {sb.step === "script" ? (
+          <ScriptStep
+            projectName={project.name}
+            sb={sb}
+            textProfile={textProfile}
+            onRenameProject={(name) => commitProject((prev) => ({ ...prev, name }))}
+            onPatchSb={patchStoryboard}
+            onSyncDiscoveredModels={handleSyncDiscoveredModels}
+            onApproveAndExtractAssets={handleExtractAssetsFromScript}
+            onGoToAssets={() => patchStoryboard({ step: "assets" })}
+            onOpenSettings={() => setSettingsOpen(true)}
+            externalBusy={globalBusy}
+          />
+        ) : null}
+
+        {sb.step === "assets" ? (
+          <AssetsStep
+            projectName={project.name}
+            sb={sb}
             textProfile={textProfile}
             imageProfile={imageProfile}
-            runtime={runtime}
-            onUpdateNode={(nodeId, updater) =>
-              commitProject((prev) => ({
-                ...prev,
-                nodes: prev.nodes.map((n) => (n.id === nodeId ? updater(n) : n)),
-              }))
-            }
-            onDeleteNode={handleDeleteNode}
-            onConnect={handleConnect}
-            onDeleteEdge={handleDeleteEdge}
-            onSyncBeatsToSegments={handleSyncBeatsToSegments}
-            onSyncDiscoveredModels={(profileId, discovered) =>
-              updateSettings((prev) => ({
-                ...prev,
-                profiles: prev.profiles.map((p) =>
-                  p.id === profileId
-                    ? {
-                        ...p,
-                        discoveredTextModels: discovered.textModels,
-                        discoveredImageModels: discovered.imageModels,
-                        modelsSyncedAt: discovered.fetchedAt,
-                      }
-                    : p,
-                ),
-              }))
-            }
-            onOpenToonflow={() => setToonflowOpen(true)}
-            onOpenPipeline={() => setPipelineOpen(true)}
+            onPatchSb={patchStoryboard}
+            onSyncDiscoveredModels={handleSyncDiscoveredModels}
+            onReExtractAssets={handleExtractAssetsFromScript}
+            onApproveAllAndGoStoryboard={handleApproveAllAndGoStoryboard}
             onOpenSettings={() => setSettingsOpen(true)}
-            onClose={() => setSelectedNodeId(null)}
+            externalBusy={globalBusy}
+          />
+        ) : null}
+
+        {sb.step === "storyboard" ? (
+          <StoryboardStep
+            project={project}
+            sb={sb}
+            textProfile={textProfile}
+            imageProfile={imageProfile}
+            onPatchSb={patchStoryboard}
+            onSyncDiscoveredModels={handleSyncDiscoveredModels}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
         ) : null}
       </main>
-
-      <ToonflowModal
-        open={toonflowOpen}
-        autoStart={toonflowAutoStart}
-        project={project}
-        textProfile={textProfile}
-        imageProfile={imageProfile}
-        onReplaceProject={(next) => commitProject(() => next)}
-        onSaveReceipt={handleSaveReceipt}
-        onSyncDiscoveredModels={(profileId, discovered) =>
-          updateSettings((prev) => ({
-            ...prev,
-            profiles: prev.profiles.map((p) =>
-              p.id === profileId
-                ? {
-                    ...p,
-                    discoveredTextModels: discovered.textModels,
-                    discoveredImageModels: discovered.imageModels,
-                    modelsSyncedAt: discovered.fetchedAt,
-                  }
-                : p,
-            ),
-          }))
-        }
-        onOpenSettings={() => setSettingsOpen(true)}
-        onOpenPipeline={() => setPipelineOpen(true)}
-        onClose={() => {
-          setToonflowAutoStart(false);
-          setToonflowOpen(false);
-        }}
-      />
-
-      <PipelineModal
-        open={pipelineOpen}
-        project={project}
-        report={report}
-        runtime={runtime}
-        onSelectNode={(nodeId) => setSelectedNodeId(nodeId)}
-        onSaveReceipt={handleSaveReceipt}
-        onClose={() => setPipelineOpen(false)}
-      />
 
       <SettingsModal
         open={settingsOpen}

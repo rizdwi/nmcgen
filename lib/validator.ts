@@ -16,6 +16,18 @@ export function getPrimaryScript(project: NmcProject): ScriptNodeData | null {
 }
 
 export function getProjectCover(project: NmcProject): string | null {
+  if (project.storyboard) {
+    for (const f of project.storyboard.frames) {
+      if (!f.candidates.length) continue;
+      const chosen = f.candidates.find((c) => c.id === f.selectedCandidateId) ?? f.candidates[f.candidates.length - 1];
+      if (chosen?.dataUrl) return chosen.dataUrl;
+    }
+    for (const a of project.storyboard.assets) {
+      if (!a.candidates.length) continue;
+      const chosen = a.candidates.find((c) => c.id === a.selectedCandidateId) ?? a.candidates[a.candidates.length - 1];
+      if (chosen?.dataUrl) return chosen.dataUrl;
+    }
+  }
   for (const segNode of getOrderedSegments(project)) {
     if (segNode.data.kind !== "segment") continue;
     const adopted = getAdoptedMedia(segNode.data);
@@ -69,7 +81,7 @@ export function updateProjectMeta(
       }
       return node;
     });
-  } else if (patch.premise?.trim() || patch.visualStyle?.trim() || patch.aspectRatio || patch.maxSegmentSec) {
+  } else if (!project.storyboard && (patch.premise?.trim() || patch.visualStyle?.trim() || patch.aspectRatio || patch.maxSegmentSec)) {
     const created = createDefaultNode("script", 40, 80, 1);
     if (created.data.kind === "script") {
       created.data = {
@@ -83,11 +95,21 @@ export function updateProjectMeta(
     nextNodes = [created, ...project.nodes];
   }
 
+  const nextStoryboard = project.storyboard
+    ? {
+        ...project.storyboard,
+        idea: patch.premise !== undefined ? patch.premise : project.storyboard.idea,
+        aspectRatio: patch.aspectRatio ?? project.storyboard.aspectRatio,
+        visualStyle: patch.visualStyle !== undefined ? patch.visualStyle : project.storyboard.visualStyle,
+      }
+    : undefined;
+
   return {
     ...project,
     name: cleanName,
     updatedAt: Date.now(),
     nodes: nextNodes,
+    ...(nextStoryboard ? { storyboard: nextStoryboard } : {}),
   };
 }
 

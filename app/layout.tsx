@@ -17,9 +17,9 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "nmcGen · Kanvas Produksi Video AI",
+  title: "nmcGen · Storyboard Studio Per-Frame",
   description:
-    "Studio kanvas node hybrid untuk menyusun naskah, bank aset referensi, segmen video, render FFmpeg lokal, dan ekspor draft CapCut.",
+    "Studio storyboard AI 3 langkah: tulis ide jadi naskah, kunci & ACC aset karakter sesuai naskah, lalu susun storyboard per-frame dengan FLUX.2 Klein 4B.",
 };
 
 export const viewport: Viewport = {

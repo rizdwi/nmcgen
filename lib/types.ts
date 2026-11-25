@@ -2,12 +2,70 @@
 
 export type NodeKind = "script" | "asset" | "segment" | "audio" | "assembly" | "export";
 export type AspectRatio = "9:16" | "16:9";
+export type ImageAspect = "16:9" | "9:16" | "3:4" | "1:1";
+export type StoryboardStep = "script" | "assets" | "storyboard";
 export type AssetCategory = "character" | "location" | "prop";
 export type ShotSize = "WS" | "MS" | "MCU" | "CU" | "ECU";
 export type CameraAngle = "Front" | "Side 90" | "Rear 3/4" | "High" | "Low";
 export type CameraMotion = "Static" | "Push-In" | "Pull-Out" | "Pan Right" | "Pan Left";
 export type AudioRole = "vo" | "bgm" | "sfx" | "ambient";
 export type PlatformPreset = "tiktok" | "reels" | "youtube" | "google-flow" | "custom";
+
+export interface StoryAssetCandidate {
+  id: string;
+  dataUrl: string;
+  model?: string;
+  createdAt: number;
+}
+
+export interface StoryAsset {
+  id: string;
+  name: string;
+  category: AssetCategory;
+  roleInScript: string;
+  visualDesc: string;
+  approved: boolean;
+  candidates: StoryAssetCandidate[];
+  selectedCandidateId?: string;
+}
+
+export interface StoryFrameCandidate {
+  id: string;
+  dataUrl: string;
+  model?: string;
+  promptUsed?: string;
+  createdAt: number;
+}
+
+export interface StoryFrame {
+  id: string;
+  index: number;
+  title: string;
+  scriptExcerpt: string;
+  sceneSummary: string;
+  dialogue: string;
+  shotSize: ShotSize;
+  cameraAngle: CameraAngle;
+  assetIds: string[];
+  sameLocationAsPrev: boolean;
+  visualPrompt: string;
+  approved: boolean;
+  candidates: StoryFrameCandidate[];
+  selectedCandidateId?: string;
+}
+
+export interface StoryboardData {
+  step: StoryboardStep;
+  idea: string;
+  aspectRatio: AspectRatio;
+  visualStyle: string;
+  scriptText: string;
+  scriptApproved: boolean;
+  assets: StoryAsset[];
+  assetsApproved: boolean;
+  frames: StoryFrame[];
+  storyFinished?: boolean;
+}
 
 export interface ScriptBeat {
   id: string;
@@ -195,6 +253,7 @@ export interface NmcProject {
   viewport: { x: number; y: number; zoom: number };
   nodes: CanvasNode[];
   edges: CanvasEdge[];
+  storyboard?: StoryboardData;
 }
 
 export type ProviderKind = "CloudflareAI" | "Gemini" | "OpenAI" | "Anthropic" | "OpenAICompatible";

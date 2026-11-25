@@ -55,6 +55,22 @@ import {
   splitIntoChapters,
   storyArcStages,
 } from "./toonflow.ts";
+import {
+  assetAspectFor,
+  buildAssetImagePrompt,
+  buildExtractAssetsFromScriptPrompt,
+  buildGenerateScriptPrompt,
+  buildNextFramePrompt,
+  buildQuickEditPrompt,
+  buildStoryboardMarkdown,
+  buildStoryboardZip,
+  composeStoryboardFramePrompt,
+  createStoryboardProject,
+  ensureStoryboard,
+  parseExtractedStoryAssets,
+  parseNextFrameResponse,
+  parseQuickEditResponse,
+} from "./storyboard.ts";
 import type { NmcProject, SegmentNodeData } from "./types.ts";
 
 // Synthetic test fixture built in test code only (no hardcoded sample in app source)
@@ -306,9 +322,9 @@ const cfDiscovered = classifyAndRankModels("CloudflareAI", [
 assert.equal(cfDiscovered.textModels[0], CLOUDFLARE_FREE_TEXT_MODELS[0]);
 assert.equal(cfDiscovered.textModels.includes("@cf/meta/llama-guard-3-8b"), false);
 assert.deepEqual(cfDiscovered.imageModels, [
-  CLOUDFLARE_FREE_IMAGE_MODELS[0],
-  CLOUDFLARE_FREE_IMAGE_MODELS[1],
-  CLOUDFLARE_FREE_IMAGE_MODELS[2],
+  "@cf/black-forest-labs/flux-2-klein-4b",
+  "@cf/black-forest-labs/flux-2-klein-9b",
+  "@cf/black-forest-labs/flux-1-schnell",
   "@cf/leonardo/phoenix-1.0",
 ]);
 assert.equal(isCloudflareMultipartImageModel("@cf/black-forest-labs/flux-2-klein-4b"), true);
@@ -316,6 +332,8 @@ assert.equal(isCloudflareMultipartImageModel("@cf/black-forest-labs/flux-1-schne
 assert.equal(isCloudflareFluxSchnellModel("@cf/black-forest-labs/flux-1-schnell"), true);
 assert.deepEqual(cloudflareImageDims("16:9"), { width: 1024, height: 576 });
 assert.deepEqual(cloudflareImageDims("9:16"), { width: 576, height: 1024 });
+assert.deepEqual(cloudflareImageDims("3:4"), { width: 640, height: 832 });
+assert.deepEqual(cloudflareImageDims("1:1"), { width: 768, height: 768 });
 assert.equal(detectBase64ImageMime("/9j/4AAQSkZJRg"), "image/jpeg");
 assert.equal(detectBase64ImageMime("iVBORw0KGgoAAA"), "image/png");
 assert.equal(extractWorkersAiText({ response: "Halo dunia" }), "Halo dunia");
@@ -334,7 +352,7 @@ assert.deepEqual(
 );
 assert.equal(shouldSwitchModel(403, "Model requires Workers Paid"), true);
 
-// 12. Full Toonflow pipeline (ingestion -> event graph -> assets -> script -> storyboard -> conversational edit -> supervision)
+// 12. Full Toonflow pipeline (legacy compatibility)
 assert.equal(storyArcStages(5).length, 5);
 assert.equal(cleanSourceText("Bab 1\r\nHalaman 1\r\nHalo   dunia\n\n\n\nBaru"), "Bab 1\nHalo dunia\n\nBaru");
 const chaps = splitIntoChapters("Bab 1: Awal\nRaka mencari adiknya.\n\nBab 2: Gudang\nMonster terbangun.");
@@ -388,20 +406,18 @@ const sbBeats = parseStoryboardBeats(
   parsedScenes,
   8,
 );
-// Adjacent duplicate shotSize + cameraAngle must be automatically broken
 assert.notEqual(sbBeats[0].cameraAngle, sbBeats[1].cameraAngle);
 
 const rebuiltTf = rebuildSegmentsFromBeats(withAssets.project, sbBeats, { replaceExisting: true });
 const rebuiltSegs = rebuiltTf.nodes.filter((n) => n.kind === "segment");
 assert.equal(rebuiltSegs.length, 2);
-// Strict visible-only wiring: G01 is EXT with only @Raka visible -> @Nadia, @Monster, and interior @Gudang must NOT be wired
 const g01Incoming = rebuiltTf.edges.filter((e) => e.target === rebuiltSegs[0].id).map((e) => e.source);
 const nadiaAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Nadia")!;
 const monsterAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Monster")!;
 const gudangAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Gudang")!;
-assert.equal(g01Incoming.includes(nadiaAsset.id), false, "Nadia mentioned only in dialogue must not be wired into Intro");
-assert.equal(g01Incoming.includes(monsterAsset.id), false, "Monster must not be wired into Intro before it appears");
-assert.equal(g01Incoming.includes(gudangAsset.id), false, "Interior warehouse must not be wired into exterior street shot");
+assert.equal(g01Incoming.includes(nadiaAsset.id), false);
+assert.equal(g01Incoming.includes(monsterAsset.id), false);
+assert.equal(g01Incoming.includes(gudangAsset.id), false);
 
 const convPatch = parseConversationalEditResponse(
   JSON.stringify({ shotSize: "CU", cameraAngle: "Low", cameraMotion: "Static", timelineSummary: "Wajah Raka tegang.", visualPrompt: "Close-up low angle of Raka sweating in rain" }),
@@ -415,5 +431,156 @@ const supReport = parseSupervisionResponse(
 );
 assert.equal(supReport.verdict, "siap");
 assert.equal(supReport.score, 88);
+
+// 13. Storyboard Studio v2: Idea -> Script -> Script-Grounded Assets (ACC) -> Per-Frame Continue + FLUX.2 0-based prompting
+const v2Proj = createStoryboardProject("Kopi Senja", {
+  idea: "Seorang barista muda bernama Dimas menemukan surat lama di bawah meja kafe.",
+  aspectRatio: "16:9",
+  visualStyle: VISUAL_STYLE_PRESETS[1].prompt, // Anime Modern (NOT photorealistic!)
+});
+assert.equal(v2Proj.schemaVersion, 2);
+assert.equal(v2Proj.storyboard?.step, "script");
+
+// Legacy migration sanity check
+const migrated = ensureStoryboard(fixture);
+assert.equal(migrated.assets.length, 2);
+assert.equal(migrated.frames.length, 2);
+
+const scriptBuilt = buildGenerateScriptPrompt({
+  projectName: v2Proj.name,
+  idea: v2Proj.storyboard!.idea,
+  visualStyle: v2Proj.storyboard!.visualStyle,
+  aspectRatio: "16:9",
+});
+assert.ok(scriptBuilt.prompt.includes("Kopi Senja"));
+
+const extractBuilt = buildExtractAssetsFromScriptPrompt({
+  projectName: v2Proj.name,
+  scriptText: "ADEGAN 1 — KAFE SENJA\nDimas (24, apron cokelat) mengelap meja kayu lalu menemukan amplop biru.",
+  visualStyle: v2Proj.storyboard!.visualStyle,
+});
+assert.ok(extractBuilt.prompt.includes("DILARANG menambah karakter"));
+
+const parsedStoryAssets = parseExtractedStoryAssets(
+  JSON.stringify([
+    { name: "Dimas", category: "character", roleInScript: "Tokoh utama (Adegan 1): barista muda", visualDesc: "24-year-old Indonesian man, tidy black hair, white shirt with dark brown barista apron" },
+    { name: "Kafe Senja", category: "location", roleInScript: "Lokasi utama (Adegan 1): kafe kayu hangat", visualDesc: "Cozy wooden Indonesian coffee shop interior, warm hanging bulbs, espresso counter" },
+    { name: "Amplop Biru", category: "prop", roleInScript: "Properti kunci (Adegan 1): surat lama", visualDesc: "Weathered pale blue paper envelope tied with twine" },
+  ]),
+);
+assert.equal(parsedStoryAssets.length, 3);
+assert.equal(assetAspectFor("character", "16:9"), "3:4");
+assert.equal(assetAspectFor("prop", "16:9"), "1:1");
+assert.equal(assetAspectFor("location", "9:16"), "9:16");
+
+// Anime visual style must NEVER be contaminated with hardcoded "Photorealistic"
+const animeAssetPrompt = buildAssetImagePrompt(parsedStoryAssets[0], VISUAL_STYLE_PRESETS[1].prompt);
+assert.ok(animeAssetPrompt.includes("Modern high-budget Japanese anime"));
+assert.equal(/photorealistic/i.test(animeAssetPrompt), false, "Anime asset prompt must not force photorealistic");
+
+// Approve assets with mock thumbnails
+const accAssets = parsedStoryAssets.map((a, idx) => ({
+  ...a,
+  approved: true,
+  candidates: [{ id: `c${idx}`, dataUrl: `data:image/png;base64,iVBORw0KGgoAAA==`, createdAt: 1 }],
+  selectedCandidateId: `c${idx}`,
+}));
+
+const nextPrompt1 = buildNextFramePrompt({
+  projectName: v2Proj.name,
+  scriptText: "ADEGAN 1 — KAFE SENJA\nDimas mengelap meja lalu melihat amplop biru.",
+  visualStyle: VISUAL_STYLE_PRESETS[1].prompt,
+  aspectRatio: "16:9",
+  approvedAssets: accAssets,
+  previousFrames: [],
+});
+assert.ok(nextPrompt1.prompt.includes(accAssets[0].id));
+
+// Frame 1 parsing strictly ignores hallucinated asset IDs
+const parsedF1 = parseNextFrameResponse(
+  JSON.stringify({
+    title: "Menyapu Meja Kafe",
+    scriptExcerpt: "Dimas mengelap meja kayu.",
+    sceneSummary: "Dimas mengelap meja kayu kafe yang tenang saat senja.",
+    dialogue: "",
+    shotSize: "MS",
+    cameraAngle: "Front",
+    assetIds: [accAssets[0].id, accAssets[1].id, "hallucinated-nonexistent-id"],
+    sameLocationAsPrev: true, // Frame 1 must force false!
+    visualPrompt: "Barista wiping a wooden table inside a cozy warm coffee shop at sunset",
+    storyFinished: false,
+  }),
+  accAssets,
+  [],
+);
+assert.equal(parsedF1.frame.index, 1);
+assert.deepEqual(parsedF1.frame.assetIds, [accAssets[0].id, accAssets[1].id]);
+assert.equal(parsedF1.frame.sameLocationAsPrev, false);
+
+// Add generated image to Frame 1, then test Frame 2 Continue + FLUX.2 0-based prompt
+parsedF1.frame.candidates = [{ id: "fc1", dataUrl: "data:image/png;base64,iVBORw0KGgoAAA==", createdAt: 2 }];
+parsedF1.frame.selectedCandidateId = "fc1";
+
+const parsedF2 = parseNextFrameResponse(
+  JSON.stringify({
+    title: "Menemukan Amplop Biru",
+    scriptExcerpt: "Dimas melihat amplop biru di bawah meja.",
+    sceneSummary: "Dimas membungkuk dan meraih amplop biru tua di bawah meja.",
+    dialogue: "Surat siapa ini?",
+    shotSize: "MS", // Same as F1 -> parser must auto-break identical framing!
+    cameraAngle: "Front",
+    assetIds: [accAssets[0].id, accAssets[2].id],
+    sameLocationAsPrev: true,
+    visualPrompt: "Barista kneeling to pick up a weathered pale blue envelope under the wooden cafe table",
+    storyFinished: true,
+  }),
+  accAssets,
+  [parsedF1.frame],
+);
+assert.equal(parsedF2.frame.index, 2);
+assert.equal(parsedF2.storyFinished, true);
+assert.notEqual(parsedF2.frame.cameraAngle, parsedF1.frame.cameraAngle, "Adjacent identical framing must vary");
+
+const composedF2 = composeStoryboardFramePrompt(
+  parsedF2.frame,
+  { visualStyle: VISUAL_STYLE_PRESETS[1].prompt, assets: accAssets },
+  parsedF1.frame,
+);
+assert.equal(composedF2.refs.length, 3, "Char + Prop + Previous Frame continuity = 3 refs");
+assert.ok(composedF2.prompt.includes("image 0 shows character Dimas"), "Must use 0-based FLUX.2 index image 0");
+assert.ok(composedF2.prompt.includes("image 1 shows object Amplop Biru"), "Must use 0-based FLUX.2 index image 1");
+assert.ok(composedF2.prompt.includes("image 2 shows the previous shot's lighting"), "Must reference previous frame as image 2");
+assert.equal(/photorealistic/i.test(composedF2.prompt), false, "Must obey Anime visualStyle without hardcoded photorealistic");
+
+const editPrompt = buildQuickEditPrompt({
+  mode: "frame",
+  label: "Frame 2",
+  currentVisualDesc: parsedF2.frame.visualPrompt,
+  instruction: "buat wajahnya lebih terkejut",
+  visualStyle: VISUAL_STYLE_PRESETS[1].prompt,
+});
+assert.ok(editPrompt.prompt.includes("image 0"));
+const parsedEdit = parseQuickEditResponse(
+  JSON.stringify({ editPrompt: "Edit image 0: make the barista look surprised", updatedVisualDesc: "Surprised barista holding blue envelope" }),
+  VISUAL_STYLE_PRESETS[1].prompt,
+  "buat wajahnya lebih terkejut",
+);
+assert.ok(parsedEdit.editPrompt.includes("image 0"));
+
+const populatedV2: NmcProject = {
+  ...v2Proj,
+  storyboard: {
+    ...v2Proj.storyboard!,
+    scriptText: "ADEGAN 1 — KAFE SENJA",
+    scriptApproved: true,
+    assets: accAssets,
+    assetsApproved: true,
+    frames: [parsedF1.frame, parsedF2.frame],
+  },
+};
+assert.ok(buildStoryboardMarkdown(populatedV2).includes("Frame 02: Menemukan Amplop Biru"));
+const sbZip = buildStoryboardZip(populatedV2);
+assert.equal(sbZip[0], 0x50);
+assert.equal(sbZip[1], 0x4b);
 
 console.log("nmcGen pipeline tests: all passed");

@@ -131,7 +131,7 @@ export async function callAi(
     key?: string;
     system?: string;
     prompt?: string;
-    aspectRatio?: "9:16" | "16:9";
+    aspectRatio?: "9:16" | "16:9" | "3:4" | "1:1";
     referenceImages?: string[];
   } = {},
 ): Promise<AiCallResponse> {

@@ -134,3 +134,78 @@ export function TrashIcon({ size = 15 }: IconProps) {
     </svg>
   );
 }
+
+export function ArrowRightIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3 8h9.5M8.75 4.25L12.5 8l-3.75 3.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="square" />
+    </svg>
+  );
+}
+
+export function ChevronLeftIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M10 3.5L5.5 8 10 12.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="square" />
+    </svg>
+  );
+}
+
+export function ChevronRightIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="square" />
+    </svg>
+  );
+}
+
+export function SparklesIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M8 1.75l1.45 4.05L13.5 7.25l-4.05 1.45L8 12.75l-1.45-4.05L2.5 7.25l4.05-1.45L8 1.75z"
+        stroke="currentColor"
+        strokeWidth="1.35"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+export function RefreshIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M13 8a5 5 0 11-1.3-3.35" stroke="currentColor" strokeWidth="1.45" strokeLinecap="square" />
+      <path d="M13 2.5v2.75h-2.75" stroke="currentColor" strokeWidth="1.45" strokeLinecap="square" />
+    </svg>
+  );
+}
+
+export function UploadIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 10.75v-7.5M5 6.25l3-3 3 3" stroke="currentColor" strokeWidth="1.45" strokeLinecap="square" />
+      <path d="M2.5 11.25v2h11v-2" stroke="currentColor" strokeWidth="1.45" strokeLinecap="square" />
+    </svg>
+  );
+}
+
+export function GridIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2" y="2.25" width="5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.35" />
+      <rect x="9" y="2.25" width="5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.35" />
+      <rect x="2" y="9.25" width="5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.35" />
+      <rect x="9" y="9.25" width="5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.35" />
+    </svg>
+  );
+}
+
+export function FilmIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.4" stroke="currentColor" strokeWidth="1.35" />
+      <path d="M4.5 2.75v10.5M11.5 2.75v10.5M1.75 6h2.75M1.75 10h2.75M11.5 6h2.75M11.5 10h2.75" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}

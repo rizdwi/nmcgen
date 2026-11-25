@@ -195,7 +195,7 @@ export default function SettingsModal({
     >
       <div className="modalDialog" onClick={(e) => e.stopPropagation()}>
         <div className="modalHeader">
-          <h2 id="settings-title">Pengaturan AI &amp; Runtime Hybrid</h2>
+          <h2 id="settings-title">Pengaturan AI (Cloudflare Workers AI)</h2>
           <button type="button" className="btn btnGhost btnIcon" aria-label="Tutup pengaturan" onClick={onClose}>
             <CloseIcon size={16} />
           </button>
@@ -422,7 +422,7 @@ export default function SettingsModal({
           {/* Active Provider Selectors */}
           <div className="sectionBox">
             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              <h3>Provider Aktif di Kanvas</h3>
+              <h3>Provider AI Aktif (Naskah &amp; Gambar)</h3>
               {cfBindingActive && cfProfile && !usingCloudflareForBoth ? (
                 <button
                   type="button"
@@ -478,80 +478,38 @@ export default function SettingsModal({
             </div>
           </div>
 
-          {/* Local vs Web Runtime Detection */}
+          {/* Runtime & Cloudflare Status */}
           <div className="sectionBox">
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              <h3>Status Runtime Server</h3>
+              <h3>Status Cloudflare AI &amp; Penyimpanan</h3>
               <button type="button" className="btn btnSm" onClick={onRefreshRuntime}>
                 Cek Ulang
               </button>
             </div>
             {!runtime ? (
-              <p style={{ margin: 0, color: "var(--ink-muted)" }}>Memeriksa FFmpeg, Python, dan pyCapCut...</p>
+              <p style={{ margin: 0, color: "var(--ink-muted)" }}>Mengecek koneksi server...</p>
             ) : (
               <>
-                <div className="fieldGroup">
-                  <span className="fieldLabel">Layanan Web Aktif (Siap Langsung di Browser)</span>
-                  <div className="nodeMetaRow">
-                    <span
-                      className="metaTag"
-                      data-tone={runtime.workersAiBinding || runtime.serverKeys.cloudflareAi ? "ok" : "warn"}
-                    >
-                      Workers AI:{" "}
-                      {runtime.workersAiBinding
-                        ? "Binding Aktif"
-                        : runtime.serverKeys.cloudflareAi
-                          ? "REST Siap"
-                          : "Belum Aktif"}
-                    </span>
-                    <span className="metaTag" data-tone={runtime.supabaseConnected ? "ok" : "warn"}>
-                      Supabase: {runtime.supabaseConnected ? "Terhubung" : "Mode Lokal"}
-                    </span>
-                    <span className="metaTag" data-tone="ok">
-                      Render Video WebM: Siap (Browser)
-                    </span>
-                    <span className="metaTag" data-tone="ok">
-                      Ekspor ZIP &amp; Google Flow: Siap
-                    </span>
-                  </div>
+                <div className="nodeMetaRow">
+                  <span
+                    className="metaTag"
+                    data-tone={runtime.workersAiBinding || runtime.serverKeys.cloudflareAi ? "ok" : "warn"}
+                  >
+                    Cloudflare Workers AI:{" "}
+                    {runtime.workersAiBinding
+                      ? "Binding Aktif (FLUX.2 Klein 4B)"
+                      : runtime.serverKeys.cloudflareAi
+                        ? "REST Siap"
+                        : "Belum Aktif"}
+                  </span>
+                  <span className="metaTag" data-tone={runtime.supabaseConnected ? "ok" : "warn"}>
+                    Supabase: {runtime.supabaseConnected ? "Terhubung" : "Penyimpanan Lokal"}
+                  </span>
                 </div>
-
-                <div className="fieldGroup">
-                  <span className="fieldLabel">Mesin Desktop Opsional (Hanya saat jalankan npm run dev di PC)</span>
-                  <div className="nodeMetaRow">
-                    <span className="metaTag" data-tone={runtime.mode === "local-hybrid" ? "ok" : undefined}>
-                      {runtime.mode === "local-hybrid" ? "Mode Lokal Penuh" : "Mode Web Cloud (Cloudflare)"}
-                    </span>
-                    <span className="metaTag" data-tone={runtime.localFfmpeg ? "ok" : undefined}>
-                      FFmpeg MP4: {runtime.localFfmpeg ? "Siap" : "Khusus PC Lokal"}
-                    </span>
-                    <span className="metaTag" data-tone={runtime.localPython ? "ok" : undefined}>
-                      Python: {runtime.localPython ? "Siap" : "Khusus PC Lokal"}
-                    </span>
-                    <span className="metaTag" data-tone={runtime.localPyCapCut ? "ok" : undefined}>
-                      pyCapCut: {runtime.localPyCapCut ? "Terpasang" : "Khusus PC Lokal"}
-                    </span>
-                  </div>
-                </div>
-
-                {runtime.isServerless ? (
-                  <p style={{ margin: 0, fontSize: 12, color: "var(--ink-muted)" }}>
-                    Pada versi web Cloudflare Workers, seluruh generate AI (teks, aset, storyboard, keyframe), render
-                    video WebM dengan subtitle &amp; audio ambient, serta unduh Bundle ZIP berjalan langsung di browser
-                    tanpa perlu FFmpeg/Python di server.
-                  </p>
-                ) : null}
-                {runtime.ffmpegVersion ? (
-                  <p className="mono" style={{ margin: 0, fontSize: 11, color: "var(--ink-muted)" }}>
-                    {runtime.ffmpegVersion}
-                  </p>
-                ) : null}
-                {!runtime.localPyCapCut && runtime.localPython ? (
-                  <div className="alertBox" data-tone="warn">
-                    Untuk ekspor langsung ke folder CapCut Drafts di PC ini, jalankan sekali di terminal:{" "}
-                    <code className="mono">pip install pycapcut==0.0.4</code>
-                  </div>
-                ) : null}
+                <p style={{ margin: 0, fontSize: 12, color: "var(--ink-muted)" }}>
+                  Default model gambar: <code className="mono">@cf/black-forest-labs/flux-2-klein-4b</code>. Semua
+                  gambar referensi aset otomatis di-resize &lt; 512×512 px agar konsisten di FLUX.2.
+                </p>
               </>
             )}
           </div>

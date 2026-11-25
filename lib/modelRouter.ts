@@ -33,6 +33,7 @@ export const CLOUDFLARE_FREE_TEXT_MODELS = [
 export const CLOUDFLARE_FREE_IMAGE_MODELS = [
   "@cf/black-forest-labs/flux-2-klein-4b",
   "@cf/black-forest-labs/flux-2-klein-9b",
+  "@cf/black-forest-labs/flux-2-dev",
   "@cf/black-forest-labs/flux-1-schnell",
   "@cf/leonardo/phoenix-1.0",
   "@cf/leonardo/lucid-origin",
@@ -54,8 +55,11 @@ export function isCloudflareFluxSchnellModel(modelId: string): boolean {
   return /flux-1-schnell/i.test(normalizeModelId(modelId));
 }
 
-export function cloudflareImageDims(aspectRatio: "9:16" | "16:9"): { width: number; height: number } {
-  return aspectRatio === "9:16" ? { width: 576, height: 1024 } : { width: 1024, height: 576 };
+export function cloudflareImageDims(aspectRatio: "9:16" | "16:9" | "3:4" | "1:1"): { width: number; height: number } {
+  if (aspectRatio === "9:16") return { width: 576, height: 1024 };
+  if (aspectRatio === "3:4") return { width: 640, height: 832 };
+  if (aspectRatio === "1:1") return { width: 768, height: 768 };
+  return { width: 1024, height: 576 };
 }
 
 export function detectBase64ImageMime(base64: string): string {
@@ -378,9 +382,9 @@ export function shouldSwitchModel(status: number, message: string): boolean {
   );
 }
 
-export function openAiImageSizeForModel(modelId: string, aspectRatio: "9:16" | "16:9"): string {
+export function openAiImageSizeForModel(modelId: string, aspectRatio: "9:16" | "16:9" | "3:4" | "1:1"): string {
   const low = normalizeModelId(modelId).toLowerCase();
-  if (low.startsWith("dall-e-2")) return "1024x1024";
-  if (low.startsWith("dall-e-3")) return aspectRatio === "9:16" ? "1024x1792" : "1792x1024";
-  return aspectRatio === "9:16" ? "1024x1536" : "1536x1024";
+  if (low.startsWith("dall-e-2") || aspectRatio === "1:1") return "1024x1024";
+  if (low.startsWith("dall-e-3")) return aspectRatio === "9:16" || aspectRatio === "3:4" ? "1024x1792" : "1792x1024";
+  return aspectRatio === "9:16" || aspectRatio === "3:4" ? "1024x1536" : "1536x1024";
 }

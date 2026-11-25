@@ -1,4 +1,4 @@
-import type { AspectRatio, ProviderKind, ProviderProfile } from "@/lib/types";
+import type { ImageAspect, ProviderKind, ProviderProfile } from "@/lib/types";
 import { getCloudflareAiBinding, type WorkersAiBinding } from "@/lib/cfEnv";
 import {
   buildCandidateChain,
@@ -27,7 +27,7 @@ type Body = {
   op: "test" | "discover" | "text" | "image";
   system?: string;
   prompt?: string;
-  aspectRatio?: AspectRatio;
+  aspectRatio?: ImageAspect;
   referenceImages?: string[];
 };
 
@@ -371,7 +371,7 @@ async function runCloudflareImageOnce(
   key: string | undefined,
   model: string,
   prompt: string,
-  aspectRatio: AspectRatio,
+  aspectRatio: ImageAspect,
   referenceImages: string[],
 ): Promise<string> {
   const t = Math.max(p.timeoutSecs || 180, 90);
@@ -557,7 +557,7 @@ async function runImageOnce(
   key: string | undefined,
   model: string,
   prompt: string,
-  aspectRatio: AspectRatio,
+  aspectRatio: ImageAspect,
   referenceImages: string[],
   aiBinding: WorkersAiBinding | null,
 ): Promise<string> {
@@ -737,7 +737,7 @@ async function runImageWithFallback(
   p: ProviderProfile,
   key: string | undefined,
   prompt: string,
-  aspectRatio: AspectRatio,
+  aspectRatio: ImageAspect,
   referenceImages: string[],
   aiBinding: WorkersAiBinding | null,
 ) {
@@ -794,12 +794,19 @@ async function runImageWithFallback(
     return null;
   };
 
-  const initial = buildCandidateChain({
+  let initial = buildCandidateChain({
     autoModel: p.autoModel,
     preferred: p.imageModel,
     discovered: knownImages,
     fallbackDefaults: liveFetched ? [] : DEFAULT_FALLBACK_IMAGE[p.kind],
   });
+
+  // When reference images are supplied on Cloudflare, put FLUX.2 multi-reference models first.
+  if (p.kind === "CloudflareAI" && referenceImages.length > 0) {
+    const flux2 = initial.filter((m) => isCloudflareMultipartImageModel(m));
+    const rest = initial.filter((m) => !isCloudflareMultipartImageModel(m));
+    initial = [...flux2, ...rest];
+  }
 
   if (initial.length === 0) {
     throw new HttpErr(

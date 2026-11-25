@@ -1,21 +1,18 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { AspectRatio, NmcProject, NodeKind, RuntimeStatus } from "@/lib/types";
+import type { AspectRatio, NmcProject, RuntimeStatus } from "@/lib/types";
 import {
   DEFAULT_VISUAL_STYLE,
   matchVisualStylePreset,
-  NODE_META,
   VISUAL_STYLE_PRESETS,
 } from "@/lib/presets";
-import { getPrimaryScript, getProjectCover, validateProject } from "@/lib/validator";
-import { CloseIcon, EditIcon, PlusIcon, SlidersIcon, TrashIcon } from "./Icons";
-
-const STAGE_KINDS: NodeKind[] = ["script", "asset", "segment", "audio", "assembly", "export"];
+import { countApprovedAssets, ensureStoryboard, getStoryboardCover } from "@/lib/storyboard";
+import { getProjectCover } from "@/lib/validator";
+import { CheckIcon, CloseIcon, EditIcon, PlusIcon, SlidersIcon, TrashIcon } from "./Icons";
 
 export interface ProjectMetaDraft {
   name: string;
   aspectRatio: AspectRatio;
-  maxSegmentSec: number;
   premise: string;
   visualStyle: string;
 }
@@ -27,7 +24,7 @@ interface ProjectDashboardProps {
   runtime: RuntimeStatus | null;
   supabaseConnected: boolean;
   onOpenProject: (projectId: string) => void;
-  onCreateProject: (meta: ProjectMetaDraft, openAfter: boolean, autoGenerate?: boolean) => Promise<void>;
+  onCreateProject: (meta: ProjectMetaDraft) => Promise<void>;
   onUpdateProjectMeta: (projectId: string, meta: ProjectMetaDraft) => Promise<void>;
   onDeleteProject: (projectId: string) => Promise<void>;
   onImportJson: (e: React.ChangeEvent<HTMLInputElement>) => void;
@@ -74,7 +71,6 @@ export default function ProjectDashboard({
   const [draft, setDraft] = useState<ProjectMetaDraft>({
     name: "",
     aspectRatio: "16:9",
-    maxSegmentSec: 8,
     premise: "",
     visualStyle: DEFAULT_VISUAL_STYLE,
   });
@@ -87,18 +83,14 @@ export default function ProjectDashboard({
 
   const summaries = useMemo(() => {
     return projects.map((p) => {
-      const report = validateProject(p);
-      const script = getPrimaryScript(p);
-      const cover = getProjectCover(p);
-      const presentKinds = new Set(p.nodes.map((n) => n.kind));
-      const segmentCount = p.nodes.filter((n) => n.kind === "segment").length;
+      const sb = ensureStoryboard(p);
+      const cover = getStoryboardCover(p) ?? getProjectCover(p);
+      const assetCounts = countApprovedAssets(sb);
       return {
         project: p,
-        report,
-        script,
+        sb,
         cover,
-        presentKinds,
-        segmentCount,
+        assetCounts,
       };
     });
   }, [projects]);
@@ -106,11 +98,11 @@ export default function ProjectDashboard({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return summaries;
-    return summaries.filter(({ project, script }) => {
+    return summaries.filter(({ project, sb }) => {
       return (
         project.name.toLowerCase().includes(q) ||
-        (script?.premise || "").toLowerCase().includes(q) ||
-        (script?.visualStyle || "").toLowerCase().includes(q)
+        sb.idea.toLowerCase().includes(q) ||
+        sb.visualStyle.toLowerCase().includes(q)
       );
     });
   }, [summaries, query]);
@@ -139,25 +131,23 @@ export default function ProjectDashboard({
     setEditingId(null);
     setFormError("");
     setDraft({
-      name: `Proyek ${projects.length + 1}`,
+      name: `Storyboard ${projects.length + 1}`,
       aspectRatio: "16:9",
-      maxSegmentSec: 8,
       premise: "",
       visualStyle: DEFAULT_VISUAL_STYLE,
     });
   };
 
   const openEditModal = (project: NmcProject) => {
-    const script = getPrimaryScript(project);
+    const sb = ensureStoryboard(project);
     setFormMode("edit");
     setEditingId(project.id);
     setFormError("");
     setDraft({
       name: project.name,
-      aspectRatio: script?.aspectRatio ?? "16:9",
-      maxSegmentSec: script?.maxSegmentSec ?? 8,
-      premise: script?.premise ?? "",
-      visualStyle: script?.visualStyle ?? DEFAULT_VISUAL_STYLE,
+      aspectRatio: sb.aspectRatio,
+      premise: sb.idea,
+      visualStyle: sb.visualStyle,
     });
   };
 
@@ -167,7 +157,8 @@ export default function ProjectDashboard({
     setFormError("");
   };
 
-  const handleSaveForm = async (openAfter: boolean, autoGenerate = false) => {
+  const handleSaveForm = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (!draft.name.trim()) {
       setFormError("Nama proyek tidak boleh kosong.");
       nameInputRef.current?.focus();
@@ -177,7 +168,7 @@ export default function ProjectDashboard({
     setFormError("");
     try {
       if (formMode === "create") {
-        await onCreateProject(draft, openAfter, autoGenerate);
+        await onCreateProject(draft);
       } else if (formMode === "edit" && editingId) {
         await onUpdateProjectMeta(editingId, draft);
       }
@@ -215,23 +206,21 @@ export default function ProjectDashboard({
           </div>
           <span
             className="runtimePill"
-            data-ready={supabaseConnected}
-            title="Status sinkronisasi database cloud Supabase"
+            data-ready={Boolean(runtime?.workersAiBinding || runtime?.serverKeys.cloudflareAi)}
+            title="Status Cloudflare Workers AI (FLUX.2 Klein 4B)"
           >
-            {supabaseConnected ? "Supabase Terhubung" : "Penyimpanan Lokal"}
+            {runtime === null
+              ? "Mengecek AI..."
+              : runtime.workersAiBinding || runtime.serverKeys.cloudflareAi
+                ? "Cloudflare AI · FLUX.2 4B"
+                : "Cloudflare AI (Setup Key)"}
           </span>
           <span
             className="runtimePill"
-            data-ready={runtime?.mode === "local-hybrid" || Boolean(runtime?.workersAiBinding)}
-            title="Status runtime server dan Cloudflare Workers AI"
+            data-ready={supabaseConnected}
+            title="Status penyimpanan cloud Supabase"
           >
-            {runtime === null
-              ? "Mengecek runtime..."
-              : runtime.mode === "local-hybrid"
-                ? "Lokal: FFmpeg Siap"
-                : runtime.workersAiBinding
-                  ? "Cloudflare Workers AI"
-                  : "Mode Web Hybrid"}
+            {supabaseConnected ? "Cloud Sync" : "Lokal"}
           </span>
         </div>
 
@@ -255,10 +244,10 @@ export default function ProjectDashboard({
             type="button"
             className="btn btnSm"
             onClick={onOpenSettings}
-            aria-label="Pengaturan AI dan Runtime"
+            aria-label="Pengaturan AI"
           >
             <SlidersIcon size={14} />
-            <span>Pengaturan</span>
+            <span>Pengaturan AI</span>
           </button>
           <button type="button" className="btn btnPrimary btnSm" onClick={openCreateModal}>
             <PlusIcon size={14} />
@@ -272,11 +261,12 @@ export default function ProjectDashboard({
           <section className="dashboardHero" aria-labelledby="dashboard-heading">
             <div className="dashboardHeroCopy">
               <h1 id="dashboard-heading" className="dashboardHeading">
-                Dashboard Proyek
+                Storyboard Studio
               </h1>
               <p className="dashboardSub">
-                Pilih kartu proyek untuk masuk ke kanvas node, ubah detail dan gaya visual proyek, atau mulai
-                produksi baru.
+                Alur lurus 3 langkah: <strong>1. Ide &amp; Naskah</strong> →{" "}
+                <strong>2. Aset &amp; Karakter (ACC)</strong> →{" "}
+                <strong>3. Storyboard Per-Frame dengan Continue</strong>.
               </p>
             </div>
 
@@ -284,7 +274,7 @@ export default function ProjectDashboard({
               <div className="dashboardControls">
                 <div className="dashboardSearchWrap">
                   <label htmlFor="project-search" className="srOnly">
-                    Cari proyek berdasarkan nama atau premis
+                    Cari proyek
                   </label>
                   <input
                     id="project-search"
@@ -308,17 +298,17 @@ export default function ProjectDashboard({
           {loading ? (
             <section className="dashboardEmpty" aria-live="polite">
               <div className="emptyCard">
-                <h2>Memuat daftar proyek...</h2>
-                <p>Menyinkronkan proyek nmcGen dari database Supabase dan penyimpanan lokal.</p>
+                <h2>Memuat proyek...</h2>
+                <p>Menyinkronkan proyek Storyboard dari penyimpanan cloud dan lokal.</p>
               </div>
             </section>
           ) : projects.length === 0 ? (
             <section className="dashboardEmpty" aria-label="Workspace kosong">
               <div className="emptyCard">
-                <h2>Belum ada proyek tersimpan</h2>
+                <h2>Mulai Storyboard Pertama Anda</h2>
                 <p>
-                  Buat proyek baru, pilih gaya visual serta target Google Flow atau FFmpeg/CapCut, lalu susun
-                  naskah adegan dengan AI di dalam kanvas node.
+                  Tulis ide cerita, generate naskah, kunci &amp; ACC aset karakter sesuai naskah dengan FLUX.2 Klein
+                  4B, lalu susun storyboard per-frame secara berurutan.
                 </p>
                 <div className="emptyActions">
                   <button type="button" className="btn btnPrimary" onClick={openCreateModal}>
@@ -326,7 +316,7 @@ export default function ProjectDashboard({
                     <span>Buat Proyek Baru</span>
                   </button>
                   <button type="button" className="btn" onClick={() => importRef.current?.click()}>
-                    Impor File JSON
+                    Impor JSON
                   </button>
                 </div>
               </div>
@@ -335,10 +325,7 @@ export default function ProjectDashboard({
             <section className="dashboardEmpty" aria-label="Hasil pencarian kosong">
               <div className="emptyCard">
                 <h2>Tidak ada proyek yang cocok</h2>
-                <p>
-                  Pencarian &ldquo;{query.trim()}&rdquo; tidak cocok dengan nama, premis, atau gaya visual proyek
-                  mana pun.
-                </p>
+                <p>Pencarian &ldquo;{query.trim()}&rdquo; tidak menemukan proyek.</p>
                 <div className="emptyActions">
                   <button type="button" className="btn" onClick={() => setQuery("")}>
                     Reset Pencarian
@@ -347,132 +334,107 @@ export default function ProjectDashboard({
               </div>
             </section>
           ) : (
-            <>
-              <div className="dashboardCountRow">
-                <span className="mono" style={{ fontSize: 12, color: "var(--ink-muted)" }}>
-                  Menampilkan {filtered.length} dari {projects.length} proyek
-                  {supabaseConnected ? " (tersinkron ke Supabase)" : " (lokal)"}
-                </span>
-              </div>
+            <div className="projectGrid">
+              {filtered.map(({ project, sb, cover, assetCounts }) => {
+                const styleBadge = styleLabelFor(sb.visualStyle);
+                const stageLabel =
+                  sb.frames.length > 0
+                    ? `${sb.frames.length} Frame`
+                    : assetCounts.total > 0
+                      ? `Aset ${assetCounts.approved}/${assetCounts.total} ACC`
+                      : sb.scriptText.trim()
+                        ? "Naskah Siap"
+                        : "Draft Awal";
 
-              <div className="projectGrid">
-                {filtered.map(({ project, report, script, cover, presentKinds, segmentCount }) => {
-                  const statusTone =
-                    project.nodes.length === 0
-                      ? "neutral"
-                      : report.ok
-                        ? "ok"
-                        : "error";
-                  const statusLabel =
-                    project.nodes.length === 0
-                      ? "Kosong"
-                      : report.ok
-                        ? "Siap"
-                        : `${report.errors.length} err`;
-                  const ratio = script?.aspectRatio ?? "16:9";
-                  const styleBadge = styleLabelFor(script?.visualStyle);
-                  const isFlowMode = (script?.maxSegmentSec ?? 15) === 8;
+                return (
+                  <article key={project.id} className="projectCard">
+                    <button
+                      type="button"
+                      className="projectPreviewBtn"
+                      onClick={() => onOpenProject(project.id)}
+                      aria-label={`Buka studio untuk ${project.name}`}
+                    >
+                      {cover ? (
+                        <img
+                          src={cover}
+                          alt={`Pratinjau ${project.name}`}
+                          className="projectThumbImg"
+                        />
+                      ) : (
+                        <div className="projectSlate">
+                          <div className="projectSlateTop">
+                            <span className="metaTag mono">{sb.aspectRatio}</span>
+                            <span className="mono projectSlateCount">{stageLabel}</span>
+                          </div>
+                          <div className="projectStagePips" aria-hidden="true">
+                            <span className="stagePip" data-filled={Boolean(sb.scriptText.trim())}>
+                              1. Naskah
+                            </span>
+                            <span className="stagePip" data-filled={assetCounts.approved > 0}>
+                              2. Aset ACC
+                            </span>
+                            <span className="stagePip" data-filled={sb.frames.length > 0}>
+                              3. Storyboard
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </button>
 
-                  return (
-                    <article key={project.id} className="projectCard">
+                    <div className="projectCardBody">
+                      <div className="projectCardHead">
+                        <h2 className="projectCardTitle">{project.name}</h2>
+                        <span
+                          className="metaTag"
+                          data-tone={sb.frames.length > 0 ? "ok" : assetCounts.approved > 0 ? "warn" : undefined}
+                        >
+                          {sb.frames.length > 0 ? <CheckIcon size={11} /> : null}
+                          <span>{stageLabel}</span>
+                        </span>
+                      </div>
+
+                      <p className="projectCardPremise">
+                        {sb.idea.trim() || sb.scriptText.trim().slice(0, 120) || "Belum ada ide cerita."}
+                      </p>
+
+                      <div className="projectCardMeta">
+                        <span className="metaTag mono">{sb.aspectRatio}</span>
+                        {styleBadge ? <span className="metaTag">{styleBadge}</span> : null}
+                        <span className="metaTag mono">{assetCounts.approved}/{assetCounts.total} aset</span>
+                      </div>
+
+                      <p className="projectCardDate">Diubah {formatUpdatedAt(project.updatedAt)}</p>
+                    </div>
+
+                    <div className="projectCardFooter">
                       <button
                         type="button"
-                        className="projectPreviewBtn"
+                        className="btn btnPrimary btnSm projectOpenBtn"
                         onClick={() => onOpenProject(project.id)}
-                        aria-label={`Buka kanvas node untuk ${project.name}`}
                       >
-                        {cover ? (
-                          <img
-                            src={cover}
-                            alt={`Pratinjau ${project.name}`}
-                            width={640}
-                            height={360}
-                            className="projectThumbImg"
-                          />
-                        ) : (
-                          <div className="projectSlate">
-                            <div className="projectSlateTop">
-                              <span className="metaTag mono">{ratio}</span>
-                              <span className="mono projectSlateCount">
-                                {project.nodes.length} node
-                              </span>
-                            </div>
-                            <div className="projectStagePips" aria-hidden="true">
-                              {STAGE_KINDS.map((kind) => (
-                                <span
-                                  key={kind}
-                                  className="stagePip"
-                                  data-filled={presentKinds.has(kind)}
-                                >
-                                  {NODE_META[kind].stage.replace(/^\d+\s+/, "")}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                        Buka Studio
                       </button>
-
-                      <div className="projectCardBody">
-                        <div className="projectCardHead">
-                          <h2 className="projectCardTitle">{project.name}</h2>
-                          <span
-                            className="metaTag"
-                            data-tone={statusTone === "neutral" ? undefined : statusTone}
-                          >
-                            {statusLabel}
-                          </span>
-                        </div>
-
-                        <p className="projectCardPremise">
-                          {script?.premise?.trim() ||
-                            "Belum ada premis naskah. Buka kanvas untuk generate naskah via AI."}
-                        </p>
-
-                        <div className="projectCardMeta">
-                          <span className="metaTag mono">{ratio}</span>
-                          {isFlowMode ? <span className="metaTag">Google Flow (8s)</span> : null}
-                          {styleBadge ? <span className="metaTag">{styleBadge}</span> : null}
-                          <span className="metaTag mono">{segmentCount} segmen</span>
-                          <span className="metaTag mono">{report.totalDurationSec} dtk</span>
-                        </div>
-
-                        <p className="projectCardDate">
-                          Diubah {formatUpdatedAt(project.updatedAt)}
-                        </p>
-                      </div>
-
-                      <div className="projectCardFooter">
-                        <button
-                          type="button"
-                          className="btn btnPrimary btnSm projectOpenBtn"
-                          onClick={() => onOpenProject(project.id)}
-                        >
-                          Buka Kanvas
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btnSm"
-                          onClick={() => openEditModal(project)}
-                          aria-label={`Edit proyek ${project.name}`}
-                        >
-                          <EditIcon size={14} />
-                          <span>Edit</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btnDanger btnSm"
-                          onClick={() => setDeletingProject(project)}
-                          aria-label={`Hapus proyek ${project.name}`}
-                        >
-                          <TrashIcon size={14} />
-                          <span>Hapus</span>
-                        </button>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            </>
+                      <button
+                        type="button"
+                        className="btn btnSm"
+                        onClick={() => openEditModal(project)}
+                        aria-label={`Edit proyek ${project.name}`}
+                      >
+                        <EditIcon size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btnDanger btnSm"
+                        onClick={() => setDeletingProject(project)}
+                        aria-label={`Hapus proyek ${project.name}`}
+                      >
+                        <TrashIcon size={14} />
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
           )}
         </div>
       </main>
@@ -488,24 +450,19 @@ export default function ProjectDashboard({
           <div className="modalDialog modalDialogCompact" onClick={(e) => e.stopPropagation()}>
             <div className="modalHeader">
               <h2 id="project-form-title">
-                {formMode === "create" ? "Buat Proyek Baru" : "Edit Kartu Proyek"}
+                {formMode === "create" ? "Buat Proyek Storyboard Baru" : "Edit Info Proyek"}
               </h2>
               <button
                 type="button"
                 className="btn btnGhost btnIcon"
-                aria-label="Tutup modal proyek"
+                aria-label="Tutup modal"
                 onClick={closeFormModal}
               >
                 <CloseIcon size={16} />
               </button>
             </div>
 
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void handleSaveForm(formMode === "create");
-              }}
-            >
+            <form onSubmit={(e) => void handleSaveForm(e)}>
               <div className="modalBody">
                 {formError ? (
                   <div className="alertBox" data-tone="error" role="alert">
@@ -515,7 +472,7 @@ export default function ProjectDashboard({
 
                 <div className="fieldGroup">
                   <label className="fieldLabel" htmlFor="dash-project-name">
-                    Nama Proyek
+                    Judul Proyek
                   </label>
                   <input
                     ref={nameInputRef}
@@ -523,14 +480,14 @@ export default function ProjectDashboard({
                     className="input"
                     value={draft.name}
                     onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                    placeholder="Contoh: Film Pendek Hujan Malam"
+                    placeholder="Contoh: Kopi Terakhir di Stasiun"
                   />
                 </div>
 
                 <div className="fieldRow">
                   <div className="fieldGroup">
                     <label className="fieldLabel" htmlFor="dash-project-ratio">
-                      Rasio Aspek
+                      Rasio Frame
                     </label>
                     <select
                       id="dash-project-ratio"
@@ -540,82 +497,53 @@ export default function ProjectDashboard({
                         setDraft((d) => ({ ...d, aspectRatio: e.target.value as AspectRatio }))
                       }
                     >
-                      <option value="16:9">16:9 (Landscape / YouTube)</option>
-                      <option value="9:16">9:16 (Vertikal / Reels / TikTok)</option>
+                      <option value="16:9">16:9 Landscape</option>
+                      <option value="9:16">9:16 Vertikal</option>
                     </select>
                   </div>
 
                   <div className="fieldGroup">
-                    <label className="fieldLabel" htmlFor="dash-project-engine">
-                      Target Durasi / Pipeline
+                    <label className="fieldLabel" htmlFor="dash-project-style-preset">
+                      Gaya Visual
                     </label>
                     <select
-                      id="dash-project-engine"
+                      id="dash-project-style-preset"
                       className="select"
-                      value={draft.maxSegmentSec}
-                      onChange={(e) =>
-                        setDraft((d) => ({ ...d, maxSegmentSec: Number(e.target.value) || 8 }))
-                      }
+                      value={selectedStylePresetId}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === "custom") return;
+                        const preset = VISUAL_STYLE_PRESETS.find((p) => p.id === val);
+                        if (preset) setDraft((d) => ({ ...d, visualStyle: preset.prompt }));
+                      }}
                     >
-                      <option value={8}>Google Flow / Veo (8 dtk)</option>
-                      <option value={15}>Seedance / Omni (15 dtk)</option>
-                      <option value={30}>Segmen Panjang (30 dtk)</option>
+                      {VISUAL_STYLE_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                      <option value="custom">Kustom</option>
                     </select>
                   </div>
                 </div>
 
-                <div className="fieldGroup">
-                  <label className="fieldLabel" htmlFor="dash-project-style-preset">
-                    Pilihan Gaya Visual Proyek
-                  </label>
-                  <select
-                    id="dash-project-style-preset"
-                    className="select"
-                    value={selectedStylePresetId}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      if (val === "custom") return;
-                      const preset = VISUAL_STYLE_PRESETS.find((p) => p.id === val);
-                      if (preset) setDraft((d) => ({ ...d, visualStyle: preset.prompt }));
-                    }}
-                  >
-                    {VISUAL_STYLE_PRESETS.map((preset) => (
-                      <option key={preset.id} value={preset.id}>
-                        {preset.label}
-                      </option>
-                    ))}
-                    <option value="custom">Kustom (Tulis Sendiri)</option>
-                  </select>
-                  {selectedStyleObj ? (
-                    <span style={{ fontSize: 12, color: "var(--ink-muted)" }}>
-                      {selectedStyleObj.summary}
-                    </span>
-                  ) : null}
-                </div>
-
-                <div className="fieldGroup">
-                  <label className="fieldLabel" htmlFor="dash-project-style">
-                    Detail Prompt Gaya Visual
-                  </label>
-                  <input
-                    id="dash-project-style"
-                    className="input"
-                    value={draft.visualStyle}
-                    onChange={(e) => setDraft((d) => ({ ...d, visualStyle: e.target.value }))}
-                    placeholder="Tulis gaya visual kustom atau pilih dari preset di atas..."
-                  />
-                </div>
+                {selectedStyleObj ? (
+                  <p className="fieldHint" style={{ marginTop: -4 }}>
+                    {selectedStyleObj.summary}
+                  </p>
+                ) : null}
 
                 <div className="fieldGroup">
                   <label className="fieldLabel" htmlFor="dash-project-premise">
-                    Premis Singkat (Bahan Generate Naskah AI)
+                    Ide Cerita Singkat
                   </label>
                   <textarea
                     id="dash-project-premise"
                     className="textarea"
+                    style={{ minHeight: 90 }}
                     value={draft.premise}
                     onChange={(e) => setDraft((d) => ({ ...d, premise: e.target.value }))}
-                    placeholder="Tulis ide cerita 1 sampai 2 kalimat, lalu generate naskah adegan lengkap di dalam kanvas..."
+                    placeholder="Tulis ide cerita 1–3 kalimat, nanti langsung di-generate jadi naskah di Tahap 1..."
                   />
                 </div>
               </div>
@@ -624,38 +552,9 @@ export default function ProjectDashboard({
                 <button type="button" className="btn" onClick={closeFormModal} disabled={submitting}>
                   Batal
                 </button>
-                {formMode === "create" ? (
-                  <>
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={submitting}
-                      onClick={() => void handleSaveForm(false)}
-                    >
-                      Simpan di Dashboard
-                    </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={submitting}
-                      onClick={() => void handleSaveForm(true, false)}
-                    >
-                      Buat &amp; Buka Kanvas
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btnPrimary"
-                      disabled={submitting}
-                      onClick={() => void handleSaveForm(true, true)}
-                    >
-                      Buat &amp; Generate Jadi (AI)
-                    </button>
-                  </>
-                ) : (
-                  <button type="submit" className="btn btnPrimary" disabled={submitting}>
-                    Simpan Perubahan
-                  </button>
-                )}
+                <button type="submit" className="btn btnPrimary" disabled={submitting}>
+                  {formMode === "create" ? "Buat & Mulai Naskah" : "Simpan Perubahan"}
+                </button>
               </div>
             </form>
           </div>
@@ -676,24 +575,17 @@ export default function ProjectDashboard({
               <button
                 type="button"
                 className="btn btnGhost btnIcon"
-                aria-label="Tutup konfirmasi hapus"
+                aria-label="Tutup konfirmasi"
                 onClick={() => setDeletingProject(null)}
               >
                 <CloseIcon size={16} />
               </button>
             </div>
-
             <div className="modalBody">
-              <p style={{ margin: 0, color: "var(--ink)" }}>
-                Anda akan menghapus proyek <strong>{deletingProject.name}</strong> ({deletingProject.nodes.length} node).
+              <p style={{ margin: 0 }}>
+                Hapus permanen proyek <strong>{deletingProject.name}</strong>?
               </p>
-              <div className="alertBox" data-tone="warn">
-                Proyek ini akan dihapus permanen dari{" "}
-                {supabaseConnected ? "database Supabase dan penyimpanan lokal browser" : "penyimpanan lokal browser"}.
-                Ekspor JSON terlebih dahulu bila masih ingin menyimpan cadangan.
-              </div>
             </div>
-
             <div className="modalFooter">
               <button
                 type="button"
@@ -710,7 +602,7 @@ export default function ProjectDashboard({
                 disabled={submitting}
               >
                 <TrashIcon size={14} />
-                <span>Ya, Hapus Proyek</span>
+                <span>Ya, Hapus</span>
               </button>
             </div>
           </div>
