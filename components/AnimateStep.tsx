@@ -1342,8 +1342,9 @@ export default function AnimateStep({
 
                 <p className="fieldHint">
                   Memakai endpoint resmi <code className="mono">/v1beta/interactions</code> ({OMNI_MODEL_ID}). Estimasi
-                  biaya Google AI Studio ~$0.07/detik (720p) sudah termasuk audio &amp; lip-sync. Untuk opsi tanpa API
-                  key berbayar, gunakan tab <strong>Antigravity / Gemini / Omni Web</strong>.
+                  biaya Google AI Studio ~$0.07/detik (720p) sudah termasuk audio &amp; lip-sync. <strong>Kunci free
+                  tier (tanpa billing aktif di proyek Google) akan ditolak Google saat generate</strong> — untuk opsi
+                  tanpa API key berbayar, gunakan tab <strong>Antigravity / Gemini / Omni Web</strong>.
                 </p>
               </section>
 
