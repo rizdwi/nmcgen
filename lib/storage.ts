@@ -136,9 +136,14 @@ export async function callAi(
   } = {},
 ): Promise<AiCallResponse> {
   const key = payload.key !== undefined ? payload.key : getApiKey(profile.id);
+  // Generate tidak boleh menggantung selamanya: batasi 240 detik agar
+  // kegagalan tampil sebagai pesan error, bukan spinner tanpa akhir.
+  const timeoutSignal =
+    typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(240_000) : undefined;
   const res = await fetch("/api/ai", {
     method: "POST",
     headers: { "content-type": "application/json" },
+    signal: timeoutSignal,
     body: JSON.stringify({
       profile,
       key: key || undefined,

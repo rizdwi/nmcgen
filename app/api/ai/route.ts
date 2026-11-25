@@ -4,6 +4,8 @@ import {
   buildCandidateChain,
   classifyAndRankModels,
   CLOUDFLARE_FREE_IMAGE_MODELS,
+  CLOUDFLARE_FAST_TEXT_MODELS,
+  GEMINI_FAST_TEXT_MODELS,
   CLOUDFLARE_FREE_TEXT_MODELS,
   cloudflareImageDims,
   detectBase64ImageMime,
@@ -36,7 +38,7 @@ const joinUrl = (base: string, tail: string) => base.replace(/\/+$/, "") + tail;
 
 const DEFAULT_FALLBACK_TEXT: Record<ProviderKind, string[]> = {
   CloudflareAI: CLOUDFLARE_FREE_TEXT_MODELS,
-  Gemini: ["gemini-4-hydrogen", "gemini-4-argon", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
+  Gemini: ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-4-argon", "gemini-4-hydrogen"],
   OpenAI: ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"],
   Anthropic: ["claude-sonnet-4-5", "claude-haiku-4-5"],
   OpenAICompatible: [],
@@ -664,7 +666,7 @@ async function runTextWithFallback(
   const fallbackNotes: string[] = [];
   const errState: { last: HttpErr | null } = { last: null };
 
-  const tryChain = async (candidates: string[], targetProfile = p, targetKey = key, maxAttempts = 6) => {
+  const tryChain = async (candidates: string[], targetProfile = p, targetKey = key, maxAttempts = 4) => {
     let attempts = 0;
     for (const model of candidates) {
       if (tried.has(model) || attempts >= maxAttempts) continue;
@@ -688,6 +690,12 @@ async function runTextWithFallback(
     preferred: p.textModel,
     discovered: knownText,
     fallbackDefaults: DEFAULT_FALLBACK_TEXT[p.kind],
+    fastFirst:
+        p.kind === "CloudflareAI"
+          ? CLOUDFLARE_FAST_TEXT_MODELS
+          : p.kind === "Gemini"
+            ? GEMINI_FAST_TEXT_MODELS
+            : [],
   });
   if (initial.length === 0) {
     throw new HttpErr(400, "Tidak ditemukan model teks yang tersedia untuk profil provider ini.");
@@ -702,6 +710,12 @@ async function runTextWithFallback(
       const refreshed = buildCandidateChain({
         autoModel: true,
         discovered: discovered.textModels,
+        fastFirst:
+        p.kind === "CloudflareAI"
+          ? CLOUDFLARE_FAST_TEXT_MODELS
+          : p.kind === "Gemini"
+            ? GEMINI_FAST_TEXT_MODELS
+            : [],
       });
       const hit2 = await tryChain(refreshed);
       if (hit2) return hit2;

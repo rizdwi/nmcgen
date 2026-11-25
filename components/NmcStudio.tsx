@@ -39,6 +39,7 @@ export default function NmcStudio() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  const [saveError, setSaveError] = useState("");
   const [loadError, setLoadError] = useState("");
   const [stepNotice, setStepNotice] = useState("");
   const [globalBusy, setGlobalBusy] = useState("");
@@ -141,8 +142,14 @@ export default function NmcStudio() {
         if (saveTimer.current) clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(() => {
           persistProject(next)
-            .then(() => setSaveState("saved"))
-            .catch(() => setSaveState("error"));
+            .then(() => {
+              setSaveError("");
+              setSaveState("saved");
+            })
+            .catch((err) => {
+              setSaveError((err as Error).message || "Gagal menyimpan ke Supabase");
+              setSaveState("error");
+            });
         }, 320);
         return next;
       });
@@ -171,8 +178,14 @@ export default function NmcStudio() {
       const latest = latestProjectRef.current;
       if (latest) {
         persistProject(latest)
-          .then(() => setSaveState("saved"))
-          .catch(() => setSaveState("error"));
+          .then(() => {
+            setSaveError("");
+            setSaveState("saved");
+          })
+          .catch((err) => {
+            setSaveError((err as Error).message || "Gagal menyimpan ke Supabase");
+            setSaveState("error");
+          });
       }
     }
   }, [persistProject]);
@@ -549,7 +562,7 @@ export default function NmcStudio() {
         </nav>
 
         <div className="topRight">
-          <span className="saveStateText" aria-live="polite">
+          <span className="saveStateText" aria-live="polite" title={saveError || undefined}>
             {saveState === "saving"
               ? "Menyimpan..."
               : saveState === "error"
@@ -578,6 +591,14 @@ export default function NmcStudio() {
           <div className="stepNoticeWrap">
             <div className="alertBox" data-tone="error" role="alert">
               {loadError}
+            </div>
+          </div>
+        ) : null}
+
+        {saveState === "error" && saveError ? (
+          <div className="stepNoticeWrap">
+            <div className="alertBox" data-tone="error" role="alert">
+              Gagal sinkron: {saveError}
             </div>
           </div>
         ) : null}

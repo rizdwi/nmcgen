@@ -321,17 +321,31 @@ export function classifyAndRankModels(
   };
 }
 
+// Model teks kecil & cepat untuk Workers AI. Rantai default berisi model
+// raksasa (26B/27B/70B) yang lambat di tier gratis; model 12B dicoba dulu
+// dalam mode auto agar generate naskah tidak menunggu ber menit-menit.
+// Bila model ini tidak tersedia, rantai fallback tetap berlanjut (404 = pindah model).
+// Model teks Gemini yang cepat. Peringkat discovery menempatkan
+// gemini-4-hydrogen (model penalaran, thinking panjang) paling atas,
+// sehingga mode auto selalu mencoba model paling lambat dulu. Flash-lite
+// dicoba dulu dalam mode auto; bila tidak tersedia, rantai tetap berlanjut.
+export const GEMINI_FAST_TEXT_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
+
+export const CLOUDFLARE_FAST_TEXT_MODELS = ["@cf/google/gemma-3-12b-it"];
+
 export function buildCandidateChain(options: {
   autoModel?: boolean;
   preferred?: string;
   discovered?: string[];
   fallbackDefaults?: string[];
+  fastFirst?: string[];
 }): string[] {
   const auto = options.autoModel !== false;
   const preferred = normalizeModelId(options.preferred || "");
   const cleanPreferred = preferred && preferred.toLowerCase() !== "auto" ? preferred : "";
   const discovered = (options.discovered ?? []).map(normalizeModelId).filter(Boolean);
   const defaults = (options.fallbackDefaults ?? []).map(normalizeModelId).filter(Boolean);
+  const fastFirst = (options.fastFirst ?? []).map(normalizeModelId).filter(Boolean);
 
   const ordered: string[] = [];
   const pushUnique = (list: string[]) => {
@@ -339,6 +353,11 @@ export function buildCandidateChain(options: {
       if (item && !ordered.includes(item)) ordered.push(item);
     }
   };
+
+  // Mode auto tanpa pilihan manual: model cepat dulu, baru rantai biasa.
+  if (auto && !cleanPreferred && fastFirst.length > 0) {
+    pushUnique(fastFirst);
+  }
 
   if (!auto && cleanPreferred) {
     // Manual override comes first, followed by live discovered models as fallback if it hits limit.

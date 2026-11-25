@@ -38,7 +38,7 @@ import {
   parseCloudflareRestCredentials,
   shouldSwitchModel,
 } from "./modelRouter.ts";
-import { mergeProjects, projectToSupabaseRow } from "./supabaseSync.ts";
+import { mergeProjects, projectToSupabaseRow, packProjectForCloud, unpackProjectFromCloud } from "./supabaseSync.ts";
 import {
   assetAspectFor,
   buildAssetImagePrompt,
@@ -275,6 +275,25 @@ const newerRemote = { ...edited, name: "Versi Cloud Baru", updatedAt: 2000 };
 const merged = mergeProjects([olderLocal], [newerRemote]);
 assert.equal(merged.length, 1);
 assert.equal(merged[0].name, "Versi Cloud Baru");
+
+// 9b. Dedupe data URL gambar duplikat saat tulis cloud & pulihkan saat baca
+const dupImg = "data:image/jpeg;base64," + "A".repeat(5000);
+const dupProject = {
+  ...edited,
+  storyboard: {
+    ...edited.storyboard,
+    assets: [
+      { id: "a1", candidates: [{ id: "c1", dataUrl: dupImg }] },
+      { id: "a2", candidates: [{ id: "c2", dataUrl: dupImg }] },
+    ],
+    frames: [{ id: "f1", candidates: [{ id: "c3", dataUrl: dupImg }] }],
+  },
+};
+const packed = packProjectForCloud(dupProject as never);
+assert.ok(JSON.stringify(packed).length < JSON.stringify(dupProject).length);
+const restored = unpackProjectFromCloud(packed);
+assert.deepEqual(restored, dupProject);
+assert.deepEqual(unpackProjectFromCloud(edited), edited);
 
 // 10. Auto model discovery & 429 fallback router
 assert.equal(detectProviderKindFromKey("AIzaSyDummyKey1234567890abcd"), "Gemini");
