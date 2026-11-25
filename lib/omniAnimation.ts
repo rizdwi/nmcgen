@@ -465,12 +465,33 @@ export function extractOmniVideoFromInteraction(raw: unknown): ParsedOmniInterac
   const id = String(obj.id || obj.name || "").trim();
   const status = String(obj.status || "unknown").toLowerCase();
   const errObj = obj.error as Record<string, unknown> | string | undefined;
+  const errFromSteps = (() => {
+    if (!Array.isArray(obj.steps)) return undefined;
+    for (const step of obj.steps) {
+      if (!step || typeof step !== "object") continue;
+      const s = step as Record<string, unknown>;
+      const se = s.error as Record<string, unknown> | string | undefined;
+      if (typeof se === "string" && se.trim()) return se;
+      if (se && typeof se === "object") {
+        const m = se.message || se.reason;
+        if (typeof m === "string" && m.trim()) return m;
+      }
+      for (const key of ["failureReason", "failure_reason", "reason"]) {
+        const v = s[key];
+        if (typeof v === "string" && v.trim()) return v;
+      }
+    }
+    return undefined;
+  })();
+  const topReason = [obj.failureReason, obj.failure_reason, obj.reason].find(
+    (v): v is string => typeof v === "string" && v.trim().length > 0,
+  );
   const errorMsg =
     typeof errObj === "string"
       ? errObj
       : errObj && typeof errObj === "object"
         ? String(errObj.message || JSON.stringify(errObj))
-        : undefined;
+        : (errFromSteps ?? topReason);
 
   let videoBase64: string | undefined;
   let videoMime: string | undefined;
@@ -522,7 +543,9 @@ export function extractOmniVideoFromInteraction(raw: unknown): ParsedOmniInterac
     videoBase64,
     videoMime: videoMime || "video/mp4",
     fileUri,
-    error: errorMsg,
+    // Jangan pernah menelan alasan kegagalan: tanpa ini UI hanya bisa
+    // menampilkan "Generasi video Omni 1.2 gagal." tanpa penyebab.
+    error: errorMsg ?? (failed ? `Status interaksi Omni 1.2: ${status || "tidak diketahui"}` : undefined),
   };
 }
 

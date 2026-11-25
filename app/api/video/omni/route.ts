@@ -145,6 +145,7 @@ export async function POST(req: Request) {
           ok: false,
           interactionId: parsed.id || id,
           status: "failed",
+          rawStatus: parsed.status,
           error: parsed.error || "Generasi video Omni 1.2 gagal.",
         });
       }
