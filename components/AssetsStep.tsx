@@ -8,7 +8,7 @@ import type {
 } from "@/lib/types";
 import { uid } from "@/lib/presets";
 import { callAi, fileToDataUrl } from "@/lib/storage";
-import { downscaleImageForFlux2 } from "@/lib/imageUtils";
+import { compressImageForStorage, downscaleImageForFlux2 } from "@/lib/imageUtils";
 import {
   ASSET_CATEGORY_LABEL,
   assetAspectFor,
@@ -18,6 +18,7 @@ import {
   countApprovedAssets,
   getSelectedAssetImage,
   parseQuickEditResponse,
+  trimCandidates,
 } from "@/lib/storyboard";
 import {
   ArrowRightIcon,
@@ -103,20 +104,22 @@ export default function AssetsStep({
     if (!res.ok || !res.image) {
       throw new Error(res.error || `Gagal generate gambar untuk ${asset.name}.`);
     }
+    const optimizedImg = await compressImageForStorage(res.image, { maxSide: 1280, quality: 0.84 });
     const candId = uid();
     const nextAssets = latestAssetsRef.current.map((a) => {
       if (a.id !== asset.id) return a;
+      const merged = [
+        ...a.candidates,
+        {
+          id: candId,
+          dataUrl: optimizedImg,
+          model: res.usedModel ? res.usedModel.split("/").pop() : "flux-2-klein-4b",
+          createdAt: Date.now(),
+        },
+      ];
       return {
         ...a,
-        candidates: [
-          ...a.candidates,
-          {
-            id: candId,
-            dataUrl: res.image!,
-            model: res.usedModel ? res.usedModel.split("/").pop() : "flux-2-klein-4b",
-            createdAt: Date.now(),
-          },
-        ],
+        candidates: trimCandidates(merged, candId, 3),
         selectedCandidateId: candId,
       };
     });
@@ -207,22 +210,24 @@ export default function AssetsStep({
         throw new Error(imgRes.error || `Gagal merevisi gambar ${asset.name}.`);
       }
 
+      const optimizedImg = await compressImageForStorage(imgRes.image, { maxSide: 1280, quality: 0.84 });
       const candId = uid();
       const nextAssets = latestAssetsRef.current.map((a) => {
         if (a.id !== asset.id) return a;
+        const merged = [
+          ...a.candidates,
+          {
+            id: candId,
+            dataUrl: optimizedImg,
+            model: imgRes.usedModel ? `${imgRes.usedModel.split("/").pop()} (edit)` : "edit",
+            createdAt: Date.now(),
+          },
+        ];
         return {
           ...a,
           visualDesc: parsed.updatedVisualDesc || a.visualDesc,
           approved: false,
-          candidates: [
-            ...a.candidates,
-            {
-              id: candId,
-              dataUrl: imgRes.image!,
-              model: imgRes.usedModel ? `${imgRes.usedModel.split("/").pop()} (edit)` : "edit",
-              createdAt: Date.now(),
-            },
-          ],
+          candidates: trimCandidates(merged, candId, 3),
           selectedCandidateId: candId,
         };
       });
@@ -240,16 +245,18 @@ export default function AssetsStep({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await fileToDataUrl(file);
+      const rawDataUrl = await fileToDataUrl(file);
+      const optimizedImg = await compressImageForStorage(rawDataUrl, { maxSide: 1280, quality: 0.84 });
       const candId = uid();
       const nextAssets = latestAssetsRef.current.map((a) =>
         a.id === assetId
           ? {
               ...a,
-              candidates: [
-                ...a.candidates,
-                { id: candId, dataUrl, model: "upload", createdAt: Date.now() },
-              ],
+              candidates: trimCandidates(
+                [...a.candidates, { id: candId, dataUrl: optimizedImg, model: "upload", createdAt: Date.now() }],
+                candId,
+                3,
+              ),
               selectedCandidateId: candId,
             }
           : a,

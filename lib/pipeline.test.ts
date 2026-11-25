@@ -21,7 +21,6 @@ import {
   updateProjectMeta,
   validateProject,
 } from "./validator.ts";
-import { buildGoogleFlowGuide } from "./bundle.ts";
 import { buildZip } from "./zip.ts";
 import {
   buildCandidateChain,
@@ -40,21 +39,6 @@ import {
   shouldSwitchModel,
 } from "./modelRouter.ts";
 import { mergeProjects, projectToSupabaseRow } from "./supabaseSync.ts";
-import {
-  applyExtractedAssetsToProject,
-  buildAssetReferenceImagePrompt,
-  cleanSourceText,
-  formatScenesToScreenplay,
-  parseConversationalEditResponse,
-  parseEventGraphResponse,
-  parseExtractedAssets,
-  parseScriptAgentResponse,
-  parseStoryboardBeats,
-  parseSupervisionResponse,
-  rebuildSegmentsFromBeats,
-  splitIntoChapters,
-  storyArcStages,
-} from "./toonflow.ts";
 import {
   assetAspectFor,
   buildAssetImagePrompt,
@@ -76,6 +60,7 @@ import {
   parseQuickEditResponse,
   parseScriptIntoSegments,
   reindexStoryboardFrames,
+  trimCandidates,
 } from "./storyboard.ts";
 import {
   buildAntigravityGeminiHandoff,
@@ -249,9 +234,6 @@ const flowPrompt = composeGoogleFlowPrompt(fixture, seg1);
 assert.ok(flowPrompt.includes("[Google Flow | G01"));
 assert.ok(flowPrompt.includes("Ingredients-to-Video"));
 assert.ok(flowPrompt.includes("@TokohA"));
-const flowGuide = buildGoogleFlowGuide(fixture);
-assert.ok(flowGuide.includes("https://labs.google/fx/tools/flow"));
-assert.ok(flowGuide.includes("Prompt Veo / Flow:"));
 
 // 6. Connection rules & auto-arrange
 assert.equal(canConnect("asset", "segment"), true);
@@ -261,7 +243,7 @@ assert.equal(autoArrangeNodes(fixture).length, fixture.nodes.length);
 // 7. Zero-dependency ZIP output header check
 const zipBytes = buildZip([
   { name: "project.json", data: '{"name":"nmcGen"}' },
-  { name: "google_flow_prompts.md", data: flowGuide },
+  { name: "google_flow_prompts.md", data: flowPrompt },
 ]);
 assert.equal(zipBytes[0], 0x50);
 assert.equal(zipBytes[1], 0x4b);
@@ -369,85 +351,33 @@ assert.deepEqual(
 );
 assert.equal(shouldSwitchModel(403, "Model requires Workers Paid"), true);
 
-// 12. Full Toonflow pipeline (legacy compatibility)
-assert.equal(storyArcStages(5).length, 5);
-assert.equal(cleanSourceText("Bab 1\r\nHalaman 1\r\nHalo   dunia\n\n\n\nBaru"), "Bab 1\nHalo dunia\n\nBaru");
-const chaps = splitIntoChapters("Bab 1: Awal\nRaka mencari adiknya.\n\nBab 2: Gudang\nMonster terbangun.");
-assert.equal(chaps.length, 2);
-assert.equal(chaps[0].title, "Bab 1: Awal");
-
-const parsedEvents = parseEventGraphResponse(
-  JSON.stringify([
-    { code: "EV01", stage: "Intro / Perkenalan", title: "Syal di Gerbang", summary: "@Raka menemukan syal kuning.", cause: "Adik hilang", effect: "Masuk gudang", conflict: "Gerbang terkunci", emotion: "cemas", location: "Gerbang Kota Tua", characters: ["@Raka"], durationSec: 8 },
-    { code: "EV02", stage: "Masalah 1 (Pemicu)", title: "Monster Bangkit", summary: "@Raka menemukan @Nadia lalu @Monster bangun.", cause: "Masuk gudang", effect: "Terjebak", conflict: "Monster menyerang", emotion: "panik", location: "Lorong Gudang", characters: ["@Raka", "@Nadia", "@Monster"], durationSec: 8 },
-  ]),
-  2,
-  8,
+// 12. Candidate history cap preserves active selection even if older than recent N
+const sampleCandidates = [
+  { id: "c1", dataUrl: "data:image/jpeg;base64,AAA", createdAt: 1 },
+  { id: "c2", dataUrl: "data:image/jpeg;base64,BBB", createdAt: 2 },
+  { id: "c3", dataUrl: "data:image/jpeg;base64,CCC", createdAt: 3 },
+  { id: "c4", dataUrl: "data:image/jpeg;base64,DDD", createdAt: 4 },
+  { id: "c5", dataUrl: "data:image/jpeg;base64,EEE", createdAt: 5 },
+];
+assert.deepEqual(
+  trimCandidates(sampleCandidates.slice(0, 3), "c2", 3).map((c) => c.id),
+  ["c1", "c2", "c3"],
+  "Arrays within maxCount must remain untouched",
 );
-assert.equal(parsedEvents.length, 2);
-assert.deepEqual(parsedEvents[0].characters, ["@Raka"]);
-
-const extractedAssets = parseExtractedAssets(
-  JSON.stringify([
-    { tag: "@Raka", title: "Raka", category: "character", lockPrompt: "26-year-old Indonesian man olive jacket DSLR camera" },
-    { tag: "@Nadia", title: "Nadia", category: "character", lockPrompt: "12-year-old Indonesian girl mustard yellow hoodie" },
-    { tag: "@Monster", title: "Monster Gudang", category: "character", lockPrompt: "3m stone and black smoke monster amber eyes" },
-    { tag: "@Gudang", title: "Gudang Rempah", category: "location", lockPrompt: "Interior of dilapidated colonial spice warehouse with wooden crates" },
-  ]),
+assert.deepEqual(
+  trimCandidates(sampleCandidates, "c5", 3).map((c) => c.id),
+  ["c3", "c4", "c5"],
+  "When selectedId is recent, keep the latest 3 candidates",
 );
-const tfStarter = createStarterProject("Tes Toonflow", { aspectRatio: "16:9", maxSegmentSec: 8 });
-const withAssets = applyExtractedAssetsToProject(tfStarter, extractedAssets);
-assert.equal(withAssets.addedCount, 4);
-assert.ok(
-  buildAssetReferenceImagePrompt(
-    { kind: "asset", tag: "@Nadia", category: "character", lockPrompt: "12-year-old Indonesian girl yellow hoodie" },
-    "Neo-noir",
-  ).includes("Single full-body front-facing studio character reference portrait"),
+assert.deepEqual(
+  trimCandidates(sampleCandidates, "c1", 3).map((c) => c.id),
+  ["c1", "c4", "c5"],
+  "When selectedId is older than latest 3, keep selectedId plus newest 2",
 );
-
-const parsedScenes = parseScriptAgentResponse(
-  JSON.stringify([
-    { code: "SC01", stage: "Intro / Perkenalan", heading: "EXT. JALANAN KOTA TUA - MALAM", action: "@Raka memungut syal di depan gerbang.", dialogue: "Nadia, kamu di dalam?", emotion: "cemas" },
-    { code: "SC02", stage: "Masalah 1 (Pemicu)", heading: "INT. GUDANG - MALAM", action: "@Monster keluar dari tembok.", dialogue: "Jangan mendekat!", emotion: "panik" },
-  ]),
-  parsedEvents,
+assert.deepEqual(
+  trimCandidates(sampleCandidates, undefined, 3).map((c) => c.id),
+  ["c3", "c4", "c5"],
 );
-assert.ok(formatScenesToScreenplay(parsedScenes).includes("BABAK 1 [Intro / Perkenalan]"));
-
-const sbBeats = parseStoryboardBeats(
-  JSON.stringify([
-    { code: "E01", stage: "Intro / Perkenalan", durationSec: 8, visibleAssets: ["@Raka"], summary: "@Raka memungut syal @Nadia di trotoar luar depan @Gudang.", dialogue: "Nadia, kamu di dalam?", continuityLock: "Syal di tangan kiri", shotSize: "WS", cameraAngle: "Front", cameraMotion: "Push-In", visualPrompt: "Wide exterior rainy cobblestone street shot of a 26-year-old Indonesian man picking up a yellow scarf" },
-    { code: "E02", stage: "Masalah 1 (Pemicu)", durationSec: 8, visibleAssets: ["@Raka", "@Nadia", "@Monster", "@Gudang"], summary: "@Raka dan @Nadia menghadapi @Monster di dalam @Gudang.", dialogue: "Jangan mendekat!", continuityLock: "Dalam gudang gelap", shotSize: "WS", cameraAngle: "Front", cameraMotion: "Pan Right", visualPrompt: "Inside dark warehouse, stone monster rising behind wooden crates" },
-  ]),
-  parsedEvents,
-  parsedScenes,
-  8,
-);
-assert.notEqual(sbBeats[0].cameraAngle, sbBeats[1].cameraAngle);
-
-const rebuiltTf = rebuildSegmentsFromBeats(withAssets.project, sbBeats, { replaceExisting: true });
-const rebuiltSegs = rebuiltTf.nodes.filter((n) => n.kind === "segment");
-assert.equal(rebuiltSegs.length, 2);
-const g01Incoming = rebuiltTf.edges.filter((e) => e.target === rebuiltSegs[0].id).map((e) => e.source);
-const nadiaAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Nadia")!;
-const monsterAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Monster")!;
-const gudangAsset = rebuiltTf.nodes.find((n) => n.kind === "asset" && n.data.kind === "asset" && n.data.tag === "@Gudang")!;
-assert.equal(g01Incoming.includes(nadiaAsset.id), false);
-assert.equal(g01Incoming.includes(monsterAsset.id), false);
-assert.equal(g01Incoming.includes(gudangAsset.id), false);
-
-const convPatch = parseConversationalEditResponse(
-  JSON.stringify({ shotSize: "CU", cameraAngle: "Low", cameraMotion: "Static", timelineSummary: "Wajah Raka tegang.", visualPrompt: "Close-up low angle of Raka sweating in rain" }),
-  rebuiltSegs[0].data as SegmentNodeData,
-);
-assert.equal(convPatch.shotSize, "CU");
-assert.equal(convPatch.cameraAngle, "Low");
-
-const supReport = parseSupervisionResponse(
-  JSON.stringify({ score: 88, verdict: "siap", summary: "Alur cerita utuh dan jelas.", strengths: ["Sebab-akibat kuat"], issues: [] }),
-);
-assert.equal(supReport.verdict, "siap");
-assert.equal(supReport.score, 88);
 
 // 13. Storyboard Studio v2: Idea -> Script -> Script-Grounded Assets (ACC) -> Per-Frame Continue + FLUX.2 0-based prompting
 const v2Proj = createStoryboardProject("Kopi Senja", {

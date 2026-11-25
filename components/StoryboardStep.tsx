@@ -11,7 +11,12 @@ import type {
 } from "@/lib/types";
 import { uid } from "@/lib/presets";
 import { callAi, downloadBlob, fileToDataUrl } from "@/lib/storage";
-import { downscaleImageForFlux2, prepareFlux2References } from "@/lib/imageUtils";
+import {
+  compressImageForStorage,
+  downscaleImageForFlux2,
+  prepareFlux2References,
+  renderSegmentStripImageBlob,
+} from "@/lib/imageUtils";
 import {
   ASSET_CATEGORY_LABEL,
   buildNextFramePrompt,
@@ -29,6 +34,7 @@ import {
   parseQuickEditResponse,
   reindexStoryboardFrames,
   SHOT_SIZE_META,
+  trimCandidates,
   VALID_CAMERA_ANGLES,
   VALID_SHOT_SIZES,
 } from "@/lib/storyboard";
@@ -38,6 +44,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
+  DownloadIcon,
   FilmIcon,
   GridIcon,
   PlusIcon,
@@ -86,6 +93,7 @@ export default function StoryboardStep({
     return list[list.length - 1]?.id ?? null;
   });
   const [busy, setBusy] = useState("");
+  const [autoRunning, setAutoRunning] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [continueNote, setContinueNote] = useState("");
@@ -94,6 +102,7 @@ export default function StoryboardStep({
   const [showScriptDrawer, setShowScriptDrawer] = useState(false);
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
   const dirtyPromptIdsRef = useRef<Set<string>>(new Set());
+  const autoStopRef = useRef(false);
   const uploadRef = useRef<HTMLInputElement>(null);
 
   const latestSbRef = useRef<StoryboardData>(sb);
@@ -251,21 +260,23 @@ export default function StoryboardStep({
       throw new Error(res.error || `Gagal generate gambar Panel ${targetFrame.panelNumber ?? targetFrame.index}.`);
     }
 
+    const optimizedImg = await compressImageForStorage(res.image, { maxSide: 1280, quality: 0.84 });
     const candId = uid();
     const updatedFrames = latestSbRef.current.frames.map((f) => {
       if (f.id !== targetFrame.id) return f;
+      const merged = [
+        ...f.candidates,
+        {
+          id: candId,
+          dataUrl: optimizedImg,
+          model: res.usedModel ? res.usedModel.split("/").pop() : "flux-2-klein-4b",
+          promptUsed: composed.prompt,
+          createdAt: Date.now(),
+        },
+      ];
       return {
         ...f,
-        candidates: [
-          ...f.candidates,
-          {
-            id: candId,
-            dataUrl: res.image!,
-            model: res.usedModel ? res.usedModel.split("/").pop() : "flux-2-klein-4b",
-            promptUsed: composed.prompt,
-            createdAt: Date.now(),
-          },
-        ],
+        candidates: trimCandidates(merged, candId, 3),
         selectedCandidateId: candId,
       };
     });
@@ -446,23 +457,25 @@ export default function StoryboardStep({
         throw new Error(imgRes.error || `Gagal merevisi Panel ${activePanelNum}.`);
       }
 
+      const optimizedImg = await compressImageForStorage(imgRes.image, { maxSide: 1280, quality: 0.84 });
       const candId = uid();
       const updated = latestSbRef.current.frames.map((f) => {
         if (f.id !== activeFrame.id) return f;
+        const merged = [
+          ...f.candidates,
+          {
+            id: candId,
+            dataUrl: optimizedImg,
+            model: imgRes.usedModel ? `${imgRes.usedModel.split("/").pop()} (edit)` : "edit",
+            promptUsed: parsed.editPrompt,
+            createdAt: Date.now(),
+          },
+        ];
         return {
           ...f,
           visualPrompt: parsed.updatedVisualDesc || f.visualPrompt,
           approved: false,
-          candidates: [
-            ...f.candidates,
-            {
-              id: candId,
-              dataUrl: imgRes.image!,
-              model: imgRes.usedModel ? `${imgRes.usedModel.split("/").pop()} (edit)` : "edit",
-              promptUsed: parsed.editPrompt,
-              createdAt: Date.now(),
-            },
-          ],
+          candidates: trimCandidates(merged, candId, 3),
           selectedCandidateId: candId,
         };
       });
@@ -480,16 +493,18 @@ export default function StoryboardStep({
     const file = e.target.files?.[0];
     if (!file || !activeFrame) return;
     try {
-      const dataUrl = await fileToDataUrl(file);
+      const rawDataUrl = await fileToDataUrl(file);
+      const optimizedImg = await compressImageForStorage(rawDataUrl, { maxSide: 1280, quality: 0.84 });
       const candId = uid();
       const updated = latestSbRef.current.frames.map((f) =>
         f.id === activeFrame.id
           ? {
               ...f,
-              candidates: [
-                ...f.candidates,
-                { id: candId, dataUrl, model: "upload", createdAt: Date.now() },
-              ],
+              candidates: trimCandidates(
+                [...f.candidates, { id: candId, dataUrl: optimizedImg, model: "upload", createdAt: Date.now() }],
+                candId,
+                3,
+              ),
               selectedCandidateId: candId,
             }
           : f,
@@ -566,6 +581,148 @@ export default function StoryboardStep({
       (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
       "-storyboard.zip";
     downloadBlob(new Blob([copy], { type: "application/zip" }), safeName);
+  };
+
+  // Auto-generate all remaining panels (plan + FLUX.2 4B image) for a segment with live Stop support
+  const handleAutoGenerateSegment = async (targetSegOverride?: StorySegment) => {
+    const seg = targetSegOverride ?? activeSegment;
+    if (!seg) return;
+    const curSb0 = latestSbRef.current;
+    if (!curSb0.scriptText.trim() && !seg.scriptContent.trim()) {
+      setError("Naskah kosong. Kembali ke Tahap 1 untuk mengisi naskah terlebih dahulu.");
+      return;
+    }
+
+    autoStopRef.current = false;
+    setAutoRunning(true);
+    setError("");
+    setNotice("");
+
+    const targetPanels = clampTargetPanels(seg.targetPanels);
+    let generatedCount = 0;
+
+    try {
+      while (!autoStopRef.current) {
+        const curSb = latestSbRef.current;
+        const segs = getStoryboardSegments(curSb);
+        const orderedNow = reindexStoryboardFrames(curSb.frames, segs);
+        const segFramesNow = orderedNow.filter((f) => f.segmentId === seg.id);
+
+        // First render any existing un-drawn panel inside this segment before creating new ones
+        const undrawn = segFramesNow.find((f) => !getSelectedFrameImage(f));
+        if (undrawn) {
+          const pNum = undrawn.panelNumber ?? 1;
+          setActiveSegmentId(seg.id);
+          setActiveFrameId(undrawn.id);
+          setBusy(`Auto Segmen ${seg.index}: menggambar Panel ${pNum}/${targetPanels} (FLUX.2 Klein 4B)...`);
+          await runGenerateFrameImage(undrawn, curSb);
+          generatedCount += 1;
+          continue;
+        }
+
+        if (segFramesNow.length >= targetPanels) break;
+
+        const nextPanelNum = segFramesNow.length + 1;
+        setBusy(`Auto Segmen ${seg.index}: menyusun Panel ${nextPanelNum}/${targetPanels}...`);
+
+        const built = buildNextFramePrompt({
+          projectName: project.name,
+          scriptText: curSb.scriptText,
+          visualStyle: curSb.visualStyle,
+          aspectRatio: curSb.aspectRatio,
+          approvedAssets,
+          previousFrames: orderedNow,
+          activeSegment: seg,
+          segmentFrames: segFramesNow,
+          totalSegments: segs.length,
+        });
+        const res = await callAi(textProfile, "text", built);
+        if (res.discovered) onSyncDiscoveredModels(textProfile.id, res.discovered);
+        if (!res.ok || !res.text) {
+          throw new Error(res.error || `Gagal menyusun Panel ${nextPanelNum}.`);
+        }
+
+        const { frame, storyFinished } = parseNextFrameResponse(res.text, approvedAssets, orderedNow, {
+          activeSegment: seg,
+          segmentFrames: segFramesNow,
+        });
+
+        const cleanFrames = commitFrames([...orderedNow, frame], { storyFinished }, segs);
+        const indexedFrame = cleanFrames.find((f) => f.id === frame.id) ?? frame;
+        const nextSb: StoryboardData = {
+          ...latestSbRef.current,
+          segments: segs,
+          frames: cleanFrames,
+          storyFinished,
+        };
+        setActiveSegmentId(seg.id);
+        setActiveFrameId(indexedFrame.id);
+
+        if (autoStopRef.current) break;
+
+        setBusy(`Auto Segmen ${seg.index}: menggambar Panel ${nextPanelNum}/${targetPanels} (FLUX.2 Klein 4B)...`);
+        await runGenerateFrameImage(indexedFrame, nextSb);
+        generatedCount += 1;
+      }
+
+      if (autoStopRef.current) {
+        setNotice(`Auto-generate dihentikan (${generatedCount} panel selesai dibuat di Segmen ${seg.index}).`);
+      } else {
+        setNotice(
+          `Segmen ${seg.index} selesai lengkap (${targetPanels} panel)! Buka Preview Strip untuk melihat papan horizontal atau unduh gambarnya.`,
+        );
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setAutoRunning(false);
+      setBusy("");
+    }
+  };
+
+  const handleStopAutoSegment = () => {
+    autoStopRef.current = true;
+    setNotice("Menghentikan setelah langkah saat ini selesai...");
+  };
+
+  const handleExportSegmentStrip = async (seg: StorySegment) => {
+    const segFrames = orderedFrames.filter((f) => f.segmentId === seg.id);
+    if (segFrames.length === 0) {
+      setError(`Belum ada panel di Segmen ${seg.index} untuk diunduh.`);
+      return;
+    }
+    setBusy(`Merender gambar Papan Strip Segmen ${seg.index}...`);
+    setError("");
+    try {
+      const blob = await renderSegmentStripImageBlob({
+        segmentIndex: seg.index,
+        segmentTitle: seg.title,
+        locationHint: seg.locationHint,
+        aspectRatio: sb.aspectRatio,
+        panels: segFrames.map((f, idx) => ({
+          panelNumber: f.panelNumber ?? idx + 1,
+          title: f.title,
+          imageDataUrl: getSelectedFrameImage(f),
+        })),
+      });
+      const slug =
+        (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
+        `-segmen-${String(seg.index).padStart(2, "0")}-strip.jpg`;
+      downloadBlob(blob, slug);
+      setNotice(`Papan Strip Segmen ${seg.index} (${segFrames.length} panel) berhasil diunduh!`);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const handleExportAllStrips = async () => {
+    const populated = segments.filter((s) => orderedFrames.some((f) => f.segmentId === s.id));
+    if (populated.length === 0) return;
+    for (const seg of populated) {
+      await handleExportSegmentStrip(seg);
+    }
   };
 
   const activeImg = activeFrame ? getSelectedFrameImage(activeFrame) : null;
@@ -656,8 +813,13 @@ export default function StoryboardStep({
       </div>
 
       {busy ? (
-        <div className="alertBox" role="status">
-          {busy}
+        <div className="alertBox" role="status" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <span>{busy}</span>
+          {autoRunning ? (
+            <button type="button" className="btn btnDanger btnSm" onClick={handleStopAutoSegment}>
+              Hentikan Auto
+            </button>
+          ) : null}
         </div>
       ) : null}
       {error ? (
@@ -722,6 +884,18 @@ export default function StoryboardStep({
             </span>
 
             <div className="actionGroup">
+              {orderedFrames.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn btnSm"
+                  disabled={Boolean(busy)}
+                  onClick={() => void handleExportAllStrips()}
+                  title="Unduh semua papan strip horizontal sebagai gambar JPG"
+                >
+                  <DownloadIcon size={13} />
+                  <span>Unduh Semua Papan (.jpg)</span>
+                </button>
+              ) : null}
               <div className="segToggle" role="tablist" aria-label="Format preview storyboard">
                 <button
                   type="button"
@@ -771,6 +945,18 @@ export default function StoryboardStep({
                             {segFrames.length}/{targetCount} Panel
                           </span>
                         </span>
+                        {segFrames.length > 0 ? (
+                          <button
+                            type="button"
+                            className="btn btnSm"
+                            disabled={Boolean(busy)}
+                            onClick={() => void handleExportSegmentStrip(seg)}
+                            title={`Simpan papan strip Segmen ${seg.index} sebagai gambar JPG`}
+                          >
+                            <DownloadIcon size={13} />
+                            <span>Unduh Papan (.jpg)</span>
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           className="btn btnGhost btnSm"
@@ -1076,20 +1262,47 @@ export default function StoryboardStep({
                 ) : null}
               </div>
 
-              <div className="panelCountPicker" role="group" aria-label="Target jumlah panel segmen aktif">
-                <span className="panelCountLabel">Target Panel:</span>
-                {PANEL_COUNT_OPTIONS.map((cnt) => (
-                  <button
-                    key={cnt}
-                    type="button"
-                    className="panelCountBtn mono"
-                    data-active={activeSegTarget === cnt}
-                    disabled={Boolean(busy)}
-                    onClick={() => handleChangeSegmentTargetPanels(activeSegment.id, cnt)}
-                  >
-                    {cnt}
+              <div className="actionGroup">
+                <div className="panelCountPicker" role="group" aria-label="Target jumlah panel segmen aktif">
+                  <span className="panelCountLabel">Target Panel:</span>
+                  {PANEL_COUNT_OPTIONS.map((cnt) => (
+                    <button
+                      key={cnt}
+                      type="button"
+                      className="panelCountBtn mono"
+                      data-active={activeSegTarget === cnt}
+                      disabled={Boolean(busy)}
+                      onClick={() => handleChangeSegmentTargetPanels(activeSegment.id, cnt)}
+                    >
+                      {cnt}
+                    </button>
+                  ))}
+                </div>
+
+                {autoRunning ? (
+                  <button type="button" className="btn btnDanger btnSm" onClick={handleStopAutoSegment}>
+                    Hentikan Auto
                   </button>
-                ))}
+                ) : activeSegmentFrames.length < activeSegTarget ||
+                  activeSegmentFrames.some((f) => !getSelectedFrameImage(f)) ? (
+                  <button
+                    type="button"
+                    className="btn btnSm"
+                    disabled={Boolean(busy)}
+                    onClick={() => void handleAutoGenerateSegment(activeSegment)}
+                    title={`Susun dan gambar otomatis sisa panel Segmen ${activeSegment.index} hingga ${activeSegTarget} panel`}
+                  >
+                    <SparklesIcon size={13} />
+                    <span>
+                      Auto-Buat Sisa (
+                      {Math.max(
+                        activeSegTarget - activeSegmentFrames.length,
+                        activeSegmentFrames.filter((f) => !getSelectedFrameImage(f)).length,
+                      )}{" "}
+                      Panel)
+                    </span>
+                  </button>
+                ) : null}
               </div>
             </div>
           ) : null}
@@ -1210,6 +1423,17 @@ export default function StoryboardStep({
                     </span>
                     <ArrowRightIcon size={15} />
                   </button>
+                  {activeSegment ? (
+                    <button
+                      type="button"
+                      className="btn btnOk btnLg"
+                      disabled={Boolean(busy)}
+                      onClick={() => void handleAutoGenerateSegment(activeSegment)}
+                    >
+                      <SparklesIcon size={15} />
+                      <span>Auto-Buat {activeSegTarget} Panel Langsung</span>
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="btn"

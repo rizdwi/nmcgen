@@ -1,5 +1,6 @@
 // Pure Supabase PostgREST sync helper (zero external SDK dependency).
 import type { NmcProject } from "./types.ts";
+import { getCloudflareEnvVar } from "./cfEnv.ts";
 import { getPrimaryScript } from "./validator.ts";
 
 export interface SupabaseConfig {
@@ -15,6 +16,21 @@ export function getServerSupabaseConfig(): SupabaseConfig | null {
     process?.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
     ""
   ).trim();
+  if (!url || !key) return null;
+  return { url, key };
+}
+
+export async function getServerSupabaseConfigAsync(): Promise<SupabaseConfig | null> {
+  const sync = getServerSupabaseConfig();
+  if (sync) return sync;
+  const url = (
+    (await getCloudflareEnvVar("SUPABASE_URL")) ||
+    (await getCloudflareEnvVar("NEXT_PUBLIC_SUPABASE_URL"))
+  ).replace(/\/+$/, "");
+  const key =
+    (await getCloudflareEnvVar("SUPABASE_PUBLISHABLE_KEY")) ||
+    (await getCloudflareEnvVar("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY")) ||
+    (await getCloudflareEnvVar("NEXT_PUBLIC_SUPABASE_ANON_KEY"));
   if (!url || !key) return null;
   return { url, key };
 }

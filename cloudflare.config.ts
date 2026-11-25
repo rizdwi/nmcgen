@@ -15,6 +15,7 @@ export default defineConfig({
       AI: bindings.ai({ dev: { remote: true } }),
       SUPABASE_URL: bindings.secret(),
       SUPABASE_PUBLISHABLE_KEY: bindings.secret(),
+      GEMINI_API_KEY: bindings.secret(),
     },
   }),
 });

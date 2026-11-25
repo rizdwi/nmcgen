@@ -60,6 +60,26 @@ export function getSelectedFrameImage(frame: StoryFrame): string | null {
   return (hit ?? frame.candidates[frame.candidates.length - 1]).dataUrl || null;
 }
 
+/**
+ * Keeps at most `maxCount` image candidates (default 3) while ALWAYS preserving `selectedId`,
+ * preventing old draft versions from bloating IndexedDB / Supabase JSON payloads.
+ */
+export function trimCandidates<T extends { id: string }>(
+  candidates: T[],
+  selectedId?: string,
+  maxCount = 3,
+): T[] {
+  if (candidates.length <= maxCount) return candidates;
+  const limit = Math.max(1, maxCount);
+  const recent = candidates.slice(-limit);
+  if (!selectedId || recent.some((c) => c.id === selectedId)) {
+    return recent;
+  }
+  const chosen = candidates.find((c) => c.id === selectedId);
+  if (!chosen) return recent;
+  return [chosen, ...candidates.slice(-(limit - 1))];
+}
+
 export function createEmptyStoryboard(options: {
   idea?: string;
   aspectRatio?: AspectRatio;

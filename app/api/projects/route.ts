@@ -1,13 +1,13 @@
 import type { NmcProject } from "@/lib/types";
 import {
-  getServerSupabaseConfig,
+  getServerSupabaseConfigAsync,
   sbDeleteProject,
   sbListProjects,
   sbUpsertProject,
 } from "@/lib/supabaseSync";
 
 export async function GET() {
-  const cfg = getServerSupabaseConfig();
+  const cfg = await getServerSupabaseConfigAsync();
   if (!cfg) {
     return Response.json({ ok: true, connected: false, projects: [] });
   }
@@ -23,7 +23,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const cfg = getServerSupabaseConfig();
+  const cfg = await getServerSupabaseConfigAsync();
   if (!cfg) {
     return Response.json({ ok: true, connected: false });
   }
@@ -46,7 +46,7 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
-  const cfg = getServerSupabaseConfig();
+  const cfg = await getServerSupabaseConfigAsync();
   if (!cfg) {
     return Response.json({ ok: true, connected: false });
   }

@@ -30,6 +30,7 @@ import {
   PlayIcon,
   RefreshIcon,
   SparklesIcon,
+  UploadIcon,
 } from "./Icons";
 
 interface AnimateStepProps {
@@ -98,6 +99,7 @@ export default function AnimateStep({
   });
 
   const [queueRunning, setQueueRunning] = useState(false);
+  const [mergingClips, setMergingClips] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState("");
   const [globalError, setGlobalError] = useState("");
   const [globalNotice, setGlobalNotice] = useState("");
@@ -105,12 +107,17 @@ export default function AnimateStep({
   const cancelRef = useRef(false);
   const blobUrlsRef = useRef<string[]>([]);
 
-  // Browser Animatic state
+  // Browser Animatic state + optional BGM track
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const bgmInputRef = useRef<HTMLInputElement>(null);
+  const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
   const [animPlaying, setAnimPlaying] = useState(false);
   const [animRecording, setAnimRecording] = useState(false);
   const [secPerPanel, setSecPerPanel] = useState(3.5);
   const [animProgress, setAnimProgress] = useState(0);
+  const [bgmUrl, setBgmUrl] = useState("");
+  const [bgmName, setBgmName] = useState("");
+  const [bgmVolume, setBgmVolume] = useState(0.55);
   const animRafRef = useRef<number | null>(null);
   const animImagesRef = useRef<Array<{ frame: ReturnType<typeof reindexStoryboardFrames>[number]; segIdx: number; img: HTMLImageElement | null }>>([]);
 
@@ -447,6 +454,102 @@ export default function AnimateStep({
     setGlobalNotice("Antrean animasi dihentikan.");
   };
 
+  // Recover a previously generated Omni 1.2 video without re-rendering (zero extra API cost!)
+  const handleRecoverSavedClip = async (plan: OmniClipPlan) => {
+    const st = clipStates[plan.id];
+    if (!st?.fileUri && !st?.interactionId) return;
+    if (!omniKeyAvailable) {
+      setGlobalError("Masukkan Gemini API Key dulu untuk memuat ulang video tersimpan dari Google.");
+      return;
+    }
+
+    setGlobalError("");
+    setClipState(plan.id, {
+      status: "processing",
+      error: undefined,
+      progressText: "Memuat ulang video tersimpan dari Omni 1.2 (tanpa render ulang)...",
+    });
+
+    try {
+      let blob: Blob | null = null;
+      let blobUrl = "";
+
+      if (st.fileUri) {
+        try {
+          const dl = await fetchPlayableBlobFromFileUri(st.fileUri);
+          blob = dl.blob;
+          blobUrl = dl.blobUrl;
+        } catch {
+          // Fallback to polling interactionId (GET returns inline base64 even if file URI expired)
+          blob = null;
+        }
+      }
+
+      if (!blob && st.interactionId) {
+        const pRes = await fetch("/api/video/omni", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            op: "poll",
+            apiKey: localGeminiKey || undefined,
+            interactionId: st.interactionId,
+          }),
+        });
+        const pData = await pRes.json();
+        if (!pRes.ok || !pData.ok) {
+          throw new Error(pData.error || "Video tersimpan sudah kedaluwarsa di server Google.");
+        }
+        if (pData.videoDataUrl) {
+          blob = base64DataUrlToBlob(pData.videoDataUrl);
+          blobUrl = URL.createObjectURL(blob);
+          blobUrlsRef.current.push(blobUrl);
+        } else if (pData.fileUri) {
+          const dl = await fetchPlayableBlobFromFileUri(pData.fileUri);
+          blob = dl.blob;
+          blobUrl = dl.blobUrl;
+        }
+      }
+
+      if (!blob || !blobUrl) {
+        throw new Error("Berkas video belum siap atau sudah kedaluwarsa (>48 jam). Silakan render ulang klip ini.");
+      }
+
+      const recovered: RuntimeClipState = {
+        status: "ready",
+        interactionId: st.interactionId,
+        fileUri: st.fileUri,
+        blob,
+        blobUrl,
+        error: undefined,
+        progressText: undefined,
+      };
+      setClipState(plan.id, recovered);
+      persistClipRecord(plan, recovered);
+      setGlobalNotice(`Video "${plan.label}" berhasil dimuat ulang tanpa render ulang.`);
+    } catch (err) {
+      setClipState(plan.id, {
+        status: "error",
+        error: (err as Error).message,
+        progressText: undefined,
+      });
+    }
+  };
+
+  const recoverableClips = useMemo(
+    () =>
+      plans.filter((plan) => {
+        const st = clipStates[plan.id];
+        return Boolean((st?.fileUri || st?.interactionId) && !st?.blobUrl && st?.status !== "processing");
+      }),
+    [plans, clipStates],
+  );
+
+  const handleRecoverAllSavedClips = async () => {
+    for (const plan of recoverableClips) {
+      await handleRecoverSavedClip(plan);
+    }
+  };
+
   const readyClips = useMemo(
     () =>
       plans
@@ -455,9 +558,137 @@ export default function AnimateStep({
     [plans, clipStates],
   );
 
+  // Merge all ready Omni 1.2 clips sequentially into 1 unified WebM video (with original audio!)
+  const handleMergeReadyClips = async () => {
+    if (readyClips.length < 2) return;
+    if (typeof MediaRecorder === "undefined") {
+      setGlobalError("Browser ini tidak mendukung penggabungan video (MediaRecorder tidak tersedia).");
+      return;
+    }
+
+    setMergingClips(true);
+    setGlobalError("");
+    setGlobalNotice(`Menggabungkan ${readyClips.length} klip Omni 1.2 menjadi 1 video utuh...`);
+
+    const mergeW = sb.aspectRatio === "9:16" ? 720 : 1280;
+    const mergeH = sb.aspectRatio === "9:16" ? 1280 : 720;
+    const canvas = document.createElement("canvas");
+    canvas.width = mergeW;
+    canvas.height = mergeH;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      setMergingClips(false);
+      setGlobalError("Canvas 2D tidak tersedia untuk penggabungan.");
+      return;
+    }
+
+    const audioCtx = new AudioContext();
+    const audioDest = audioCtx.createMediaStreamDestination();
+    const videoStream = canvas.captureStream(30);
+    const combinedStream = new MediaStream([
+      ...videoStream.getVideoTracks(),
+      ...audioDest.stream.getAudioTracks(),
+    ]);
+
+    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
+      ? "video/webm;codecs=vp9,opus"
+      : "video/webm";
+    const recorder = new MediaRecorder(combinedStream, { mimeType: mime, videoBitsPerSecond: 5_000_000 });
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = (ev) => {
+      if (ev.data.size > 0) chunks.push(ev.data);
+    };
+
+    const donePromise = new Promise<Blob>((resolve) => {
+      recorder.onstop = () => resolve(new Blob(chunks, { type: "video/webm" }));
+    });
+
+    recorder.start();
+
+    try {
+      for (let i = 0; i < readyClips.length; i++) {
+        const clipUrl = readyClips[i].state.blobUrl!;
+        setGlobalNotice(`Menggabungkan klip ${i + 1}/${readyClips.length}...`);
+
+        await new Promise<void>((resolve, reject) => {
+          const video = document.createElement("video");
+          video.src = clipUrl;
+          video.playsInline = true;
+          video.crossOrigin = "anonymous";
+          const source = audioCtx.createMediaElementSource(video);
+          source.connect(audioDest);
+
+          let raf = 0;
+          const drawLoop = () => {
+            if (video.paused || video.ended) return;
+            ctx.fillStyle = "#000";
+            ctx.fillRect(0, 0, mergeW, mergeH);
+            const vw = video.videoWidth || mergeW;
+            const vh = video.videoHeight || mergeH;
+            const scale = Math.min(mergeW / vw, mergeH / vh);
+            const dw = vw * scale;
+            const dh = vh * scale;
+            ctx.drawImage(video, (mergeW - dw) / 2, (mergeH - dh) / 2, dw, dh);
+            raf = requestAnimationFrame(drawLoop);
+          };
+
+          video.onended = () => {
+            cancelAnimationFrame(raf);
+            source.disconnect();
+            resolve();
+          };
+          video.onerror = () => {
+            cancelAnimationFrame(raf);
+            source.disconnect();
+            reject(new Error(`Gagal membaca Klip ${i + 1} saat penggabungan.`));
+          };
+          video.onplay = () => {
+            raf = requestAnimationFrame(drawLoop);
+          };
+          void video.play().catch(reject);
+        });
+      }
+
+      if (recorder.state !== "inactive") recorder.stop();
+      const mergedBlob = await donePromise;
+      const slug =
+        (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
+        "-omni-1.2-lengkap.webm";
+      downloadBlob(mergedBlob, slug);
+      setGlobalNotice(`Video gabungan (${readyClips.length} klip) berhasil diunduh!`);
+    } catch (err) {
+      if (recorder.state !== "inactive") recorder.stop();
+      setGlobalError(`Penggabungan klip gagal: ${(err as Error).message}`);
+    } finally {
+      void audioCtx.close().catch(() => {});
+      setMergingClips(false);
+    }
+  };
+
   // =========================================================================
-  // BROWSER ANIMATIC ENGINE (100% Free Client-Side Cinema Reel + WebM Export)
+  // BROWSER ANIMATIC ENGINE (100% Free Client-Side Cinema Reel + BGM + WebM)
   // =========================================================================
+  const handleUploadBgm = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (bgmUrl) URL.revokeObjectURL(bgmUrl);
+    const url = URL.createObjectURL(file);
+    blobUrlsRef.current.push(url);
+    setBgmUrl(url);
+    setBgmName(file.name);
+    setGlobalNotice(`Musik latar "${file.name}" dipasang untuk Animatic.`);
+    e.target.value = "";
+  };
+
+  const handleClearBgm = () => {
+    if (bgmAudioRef.current) {
+      bgmAudioRef.current.pause();
+      bgmAudioRef.current = null;
+    }
+    setBgmUrl("");
+    setBgmName("");
+  };
+
   const loadAnimaticImages = async () => {
     const loaded = await Promise.all(
       renderedFrames.map(
@@ -592,6 +823,10 @@ export default function AnimateStep({
       cancelAnimationFrame(animRafRef.current);
       animRafRef.current = null;
     }
+    if (bgmAudioRef.current) {
+      bgmAudioRef.current.pause();
+      bgmAudioRef.current.currentTime = 0;
+    }
     setAnimPlaying(false);
   };
 
@@ -605,18 +840,47 @@ export default function AnimateStep({
 
     const totalDur = items.length * secPerPanel;
     let recorder: MediaRecorder | null = null;
+    let audioCtx: AudioContext | null = null;
     const chunks: BlobPart[] = [];
+
+    // Prepare optional BGM playback / mixing
+    let audioEl: HTMLAudioElement | null = null;
+    if (bgmUrl) {
+      audioEl = new Audio(bgmUrl);
+      audioEl.loop = true;
+      audioEl.volume = bgmVolume;
+      bgmAudioRef.current = audioEl;
+    }
 
     if (recordWebm) {
       if (typeof MediaRecorder === "undefined" || typeof canvas.captureStream !== "function") {
         setGlobalError("Browser ini tidak mendukung perekaman WebM langsung.");
         return;
       }
-      const stream = canvas.captureStream(30);
-      const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-        ? "video/webm;codecs=vp9"
-        : "video/webm";
-      recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 4_500_000 });
+      const videoStream = canvas.captureStream(30);
+      let combinedStream: MediaStream = videoStream;
+
+      if (audioEl) {
+        audioCtx = new AudioContext();
+        const src = audioCtx.createMediaElementSource(audioEl);
+        const gain = audioCtx.createGain();
+        gain.gain.value = bgmVolume;
+        const dest = audioCtx.createMediaStreamDestination();
+        src.connect(gain);
+        gain.connect(dest);
+        gain.connect(audioCtx.destination);
+        combinedStream = new MediaStream([
+          ...videoStream.getVideoTracks(),
+          ...dest.stream.getAudioTracks(),
+        ]);
+      }
+
+      const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
+        ? "video/webm;codecs=vp9,opus"
+        : MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+          ? "video/webm;codecs=vp9"
+          : "video/webm";
+      recorder = new MediaRecorder(combinedStream, { mimeType: mime, videoBitsPerSecond: 4_500_000 });
       recorder.ondataavailable = (ev) => {
         if (ev.data.size > 0) chunks.push(ev.data);
       };
@@ -627,10 +891,17 @@ export default function AnimateStep({
           "-animatic.webm";
         downloadBlob(blob, safeName);
         setAnimRecording(false);
-        setGlobalNotice(`Animatic WebM (${totalDur.toFixed(1)} dtk) berhasil diunduh.`);
+        if (audioCtx) void audioCtx.close().catch(() => {});
+        setGlobalNotice(
+          `Animatic WebM (${totalDur.toFixed(1)} dtk${bgmName ? " + BGM" : ""}) berhasil diunduh.`,
+        );
       };
       setAnimRecording(true);
       recorder.start();
+    }
+
+    if (audioEl) {
+      void audioEl.play().catch(() => {});
     }
 
     setAnimPlaying(true);
@@ -644,6 +915,10 @@ export default function AnimateStep({
       if (elapsed >= totalDur) {
         setAnimPlaying(false);
         animRafRef.current = null;
+        if (audioEl) {
+          audioEl.pause();
+          audioEl.currentTime = 0;
+        }
         if (recorder && recorder.state !== "inactive") recorder.stop();
         return;
       }
@@ -992,6 +1267,18 @@ export default function AnimateStep({
                   </div>
 
                   <div className="actionGroup">
+                    {recoverableClips.length > 0 ? (
+                      <button
+                        type="button"
+                        className="btn btnOk btnSm"
+                        disabled={!omniKeyAvailable || queueRunning}
+                        onClick={() => void handleRecoverAllSavedClips()}
+                        title="Muat ulang klip yang pernah dirender tanpa biaya render ulang"
+                      >
+                        <RefreshIcon size={13} />
+                        <span>Muat Ulang Video Tersimpan ({recoverableClips.length})</span>
+                      </button>
+                    ) : null}
                     <a
                       href={ANIMATION_APP_LINKS.aiStudio}
                       target="_blank"
@@ -1070,9 +1357,25 @@ export default function AnimateStep({
                         Putar Gabungan Hasil Animasi ({readyClips.length}/{plans.length} Klip Siap)
                       </h3>
                     </div>
-                    <span className="metaTag mono">
-                      Memutar Klip {Math.min(playlistIdx + 1, readyClips.length)} / {readyClips.length}
-                    </span>
+                    <div className="actionGroup">
+                      <span className="metaTag mono">
+                        Klip {Math.min(playlistIdx + 1, readyClips.length)} / {readyClips.length}
+                      </span>
+                      {readyClips.length >= 2 ? (
+                        <button
+                          type="button"
+                          className="btn btnPrimary btnSm"
+                          disabled={mergingClips}
+                          onClick={() => void handleMergeReadyClips()}
+                          title="Gabungkan semua klip siap beserta suaranya jadi 1 berkas video WebM"
+                        >
+                          <DownloadIcon size={13} />
+                          <span>
+                            {mergingClips ? "Menggabungkan..." : `Gabung & Unduh 1 Video (${readyClips.length} Klip)`}
+                          </span>
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
 
                   <div className="omniReelStage">
@@ -1111,6 +1414,7 @@ export default function AnimateStep({
                   const st = clipStates[plan.id] ?? { status: "idle" };
                   const isBusyClip = st.status === "processing" || st.status === "queued";
                   const editText = editInputs[plan.id] ?? "";
+                  const canRecoverSaved = Boolean((st.fileUri || st.interactionId) && !st.blobUrl);
 
                   return (
                     <article key={plan.id} className="panelCard omniClipCard" data-status={st.status}>
@@ -1132,7 +1436,9 @@ export default function AnimateStep({
                           }
                         >
                           {st.status === "ready"
-                            ? "Selesai ✓"
+                            ? st.blobUrl
+                              ? "Selesai ✓"
+                              : "Tersimpan di Omni"
                             : st.status === "processing"
                               ? "Merender..."
                               : st.status === "queued"
@@ -1254,14 +1560,25 @@ export default function AnimateStep({
                       </details>
 
                       <div className="actionGroup">
+                        {canRecoverSaved ? (
+                          <button
+                            type="button"
+                            className="btn btnOk btnSm"
+                            disabled={!omniKeyAvailable || isBusyClip}
+                            onClick={() => void handleRecoverSavedClip(plan)}
+                          >
+                            <RefreshIcon size={13} />
+                            <span>Muat Ulang Video (Gratis)</span>
+                          </button>
+                        ) : null}
                         <button
                           type="button"
-                          className="btn btnPrimary btnSm"
+                          className={canRecoverSaved ? "btn btnSm" : "btn btnPrimary btnSm"}
                           disabled={!omniKeyAvailable || isBusyClip}
                           onClick={() => void runOmniClipJob(plan, "create")}
                         >
-                          {st.blobUrl ? <RefreshIcon size={13} /> : <SparklesIcon size={13} />}
-                          <span>{st.blobUrl ? "Render Ulang (Omni 1.2)" : "Animasikan Klip (Omni 1.2)"}</span>
+                          {st.blobUrl || canRecoverSaved ? <RefreshIcon size={13} /> : <SparklesIcon size={13} />}
+                          <span>{st.blobUrl || canRecoverSaved ? "Render Ulang (Omni 1.2)" : "Animasikan Klip (Omni 1.2)"}</span>
                         </button>
                         <button
                           type="button"
@@ -1280,7 +1597,7 @@ export default function AnimateStep({
           ) : null}
 
           {/* =============================================================== */}
-          {/* TAB 3: FREE IN-BROWSER ANIMATIC REEL + WEBM EXPORT              */}
+          {/* TAB 3: FREE IN-BROWSER ANIMATIC REEL + BGM + WEBM EXPORT        */}
           {/* =============================================================== */}
           {engineTab === "animatic" ? (
             <section className="panelCard animaticCard">
@@ -1288,25 +1605,78 @@ export default function AnimateStep({
                 <div>
                   <h3>Preview Animatic Instan ({renderedFrames.length} Panel Bergambar)</h3>
                   <p className="fieldHint">
-                    Cek alur gerak, tempo, dan dialog seluruh storyboard langsung di browser (Ken Burns + crossfade +
-                    subtitle) tanpa API key dan tanpa biaya.
+                    Cek alur gerak, tempo, musik latar, dan dialog seluruh storyboard langsung di browser (Ken Burns +
+                    crossfade + subtitle) tanpa API key dan tanpa biaya.
                   </p>
                 </div>
 
-                <label className="inlineControl">
-                  <span className="fieldLabel">Durasi/Panel:</span>
-                  <select
-                    className="select inputSm"
-                    value={secPerPanel}
+                <div className="actionGroup">
+                  <label className="inlineControl">
+                    <span className="fieldLabel">Durasi/Panel:</span>
+                    <select
+                      className="select inputSm"
+                      value={secPerPanel}
+                      disabled={animPlaying || animRecording}
+                      onChange={(e) => setSecPerPanel(Number(e.target.value))}
+                    >
+                      <option value={2.5}>2,5 detik (Cepat)</option>
+                      <option value={3.5}>3,5 detik (Standar)</option>
+                      <option value={5}>5,0 detik (Santai)</option>
+                    </select>
+                  </label>
+
+                  <button
+                    type="button"
+                    className="btn btnSm"
                     disabled={animPlaying || animRecording}
-                    onChange={(e) => setSecPerPanel(Number(e.target.value))}
+                    onClick={() => bgmInputRef.current?.click()}
                   >
-                    <option value={2.5}>2,5 detik (Cepat)</option>
-                    <option value={3.5}>3,5 detik (Standar)</option>
-                    <option value={5}>5,0 detik (Santai)</option>
-                  </select>
-                </label>
+                    <UploadIcon size={13} />
+                    <span>{bgmName ? "Ganti BGM" : "+ Musik Latar (MP3/WAV)"}</span>
+                  </button>
+                  <input
+                    ref={bgmInputRef}
+                    type="file"
+                    accept="audio/*"
+                    className="srOnly"
+                    onChange={handleUploadBgm}
+                  />
+                </div>
               </div>
+
+              {bgmName ? (
+                <div className="toolbarCard" style={{ padding: "8px 12px" }}>
+                  <div className="metaInline">
+                    <span className="metaTag mono">BGM Aktif</span>
+                    <strong style={{ fontSize: 12.5 }}>{bgmName}</strong>
+                  </div>
+                  <div className="actionGroup">
+                    <label className="inlineControl">
+                      <span className="fieldHint">Volume ({Math.round(bgmVolume * 100)}%)</span>
+                      <input
+                        type="range"
+                        min={0.05}
+                        max={1}
+                        step={0.05}
+                        value={bgmVolume}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          setBgmVolume(v);
+                          if (bgmAudioRef.current) bgmAudioRef.current.volume = v;
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="btn btnGhost btnSm"
+                      disabled={animPlaying || animRecording}
+                      onClick={handleClearBgm}
+                    >
+                      Hapus BGM
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {renderedFrames.length === 0 ? (
                 <div className="emptyPanel">
@@ -1351,7 +1721,11 @@ export default function AnimateStep({
                       onClick={() => void runAnimaticPlayback(true)}
                     >
                       <DownloadIcon size={14} />
-                      <span>{animRecording ? "Merekam WebM..." : "Rekam & Unduh Animatic (.webm)"}</span>
+                      <span>
+                        {animRecording
+                          ? "Merekam WebM..."
+                          : `Rekam & Unduh Animatic (.webm${bgmName ? " + BGM" : ""})`}
+                      </span>
                     </button>
                   </div>
                 </>

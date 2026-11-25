@@ -1,0 +1,43 @@
+name: Build & Deploy Cloudflare Workers
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests & TypeScript check
+        run: |
+          npm test
+          ./node_modules/.bin/tsc --noEmit
+
+      - name: Build Cloudflare Workers bundle (Vinext)
+        run: npm run build:vinext
+
+      - name: Deploy to Cloudflare Workers (when secrets configured)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            npm run deploy:vinext
+          else
+            echo "Build lulus! Untuk auto-deploy ke Cloudflare Workers, tambahkan secret CLOUDFLARE_API_TOKEN dan CLOUDFLARE_ACCOUNT_ID di GitHub Repository Settings -> Secrets and variables -> Actions."
+          fi
+
