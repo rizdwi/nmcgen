@@ -21,6 +21,7 @@ import {
   parseExtractedStoryAssets,
   parseScriptIntoSegments,
 } from "@/lib/storyboard";
+import AnimateStep from "./AnimateStep";
 import AssetsStep from "./AssetsStep";
 import ProjectDashboard, { type ProjectMetaDraft } from "./ProjectDashboard";
 import ScriptStep from "./ScriptStep";
@@ -433,6 +434,10 @@ export default function NmcStudio() {
       setStepNotice("Generate dan beri ACC pada Aset & Karakter dulu di Tahap 2 agar Storyboard mengacu pada aset yang sudah ACC.");
       return;
     }
+    if (target === "animate" && sb.frames.length === 0) {
+      setStepNotice("Buat minimal 1 panel storyboard dulu di Tahap 3 sebelum menganimasikan ke Gemini / Omni 1.2.");
+      return;
+    }
     patchStoryboard({ step: target });
   };
 
@@ -471,8 +476,8 @@ export default function NmcStudio() {
           </select>
         </div>
 
-        {/* Center: Clean 3-Step Linear Stepper */}
-        <nav className="stepperNav" aria-label="Tahapan Storyboard">
+        {/* Center: Clean 4-Step Linear Stepper */}
+        <nav className="stepperNav" aria-label="Tahapan Storyboard & Animasi">
           <button
             type="button"
             className="stepperBtn"
@@ -524,6 +529,22 @@ export default function NmcStudio() {
           >
             <span className="stepperNum mono">3</span>
             <span>Storyboard{sb.frames.length > 0 ? ` (${sb.frames.length})` : ""}</span>
+          </button>
+
+          <span className="stepperArrow" aria-hidden="true">
+            →
+          </span>
+
+          <button
+            type="button"
+            className="stepperBtn"
+            data-active={sb.step === "animate"}
+            data-done={Boolean(sb.animationClips?.some((c) => c.status === "ready"))}
+            data-locked={sb.frames.length === 0}
+            onClick={() => handleNavigateStep("animate")}
+          >
+            <span className="stepperNum mono">4</span>
+            <span>Animasi</span>
           </button>
         </nav>
 
@@ -607,7 +628,18 @@ export default function NmcStudio() {
             imageProfile={imageProfile}
             onPatchSb={patchStoryboard}
             onSyncDiscoveredModels={handleSyncDiscoveredModels}
+            onGoToAnimate={() => patchStoryboard({ step: "animate" })}
             onOpenSettings={() => setSettingsOpen(true)}
+          />
+        ) : null}
+
+        {sb.step === "animate" ? (
+          <AnimateStep
+            project={project}
+            sb={sb}
+            runtime={runtime}
+            onPatchSb={patchStoryboard}
+            onBackToStoryboard={() => patchStoryboard({ step: "storyboard" })}
           />
         ) : null}
       </main>

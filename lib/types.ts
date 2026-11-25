@@ -3,13 +3,32 @@
 export type NodeKind = "script" | "asset" | "segment" | "audio" | "assembly" | "export";
 export type AspectRatio = "9:16" | "16:9";
 export type ImageAspect = "16:9" | "9:16" | "3:4" | "1:1";
-export type StoryboardStep = "script" | "assets" | "storyboard";
+export type StoryboardStep = "script" | "assets" | "storyboard" | "animate";
 export type AssetCategory = "character" | "location" | "prop";
 export type ShotSize = "WS" | "MS" | "MCU" | "CU" | "ECU";
 export type CameraAngle = "Front" | "Side 90" | "Rear 3/4" | "High" | "Low";
 export type CameraMotion = "Static" | "Push-In" | "Pull-Out" | "Pan Right" | "Pan Left";
 export type AudioRole = "vo" | "bgm" | "sfx" | "ambient";
 export type PlatformPreset = "tiktok" | "reels" | "youtube" | "google-flow" | "custom";
+export type OmniResolution = "360p" | "720p" | "1080p" | "4k";
+export type OmniAnimationMode = "segment" | "transition" | "panel";
+
+export interface StoryAnimationClip {
+  id: string;
+  label: string;
+  mode: OmniAnimationMode;
+  segmentId?: string;
+  frameIds: string[];
+  durationSec: number;
+  resolution: OmniResolution;
+  prompt: string;
+  status: "idle" | "queued" | "processing" | "ready" | "error";
+  interactionId?: string;
+  fileUri?: string;
+  videoUrl?: string;
+  error?: string;
+  updatedAt: number;
+}
 
 export interface StoryAssetCandidate {
   id: string;
@@ -77,6 +96,7 @@ export interface StoryboardData {
   assetsApproved: boolean;
   frames: StoryFrame[];
   storyFinished?: boolean;
+  animationClips?: StoryAnimationClip[];
 }
 
 export interface ScriptBeat {

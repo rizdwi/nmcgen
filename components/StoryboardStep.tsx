@@ -57,6 +57,7 @@ interface StoryboardStepProps {
     profileId: string,
     discovered: { textModels: string[]; imageModels: string[]; fetchedAt: number },
   ) => void;
+  onGoToAnimate?: () => void;
   onOpenSettings: () => void;
 }
 
@@ -69,6 +70,7 @@ export default function StoryboardStep({
   imageProfile,
   onPatchSb,
   onSyncDiscoveredModels,
+  onGoToAnimate,
   onOpenSettings,
 }: StoryboardStepProps) {
   const segments = useMemo(() => getStoryboardSegments(sb), [sb]);
@@ -589,7 +591,7 @@ export default function StoryboardStep({
       {/* Step header with instant Editor vs Storyboard Strip Preview switcher */}
       <div className="stepIntroRow">
         <div>
-          <span className="stepKicker mono">TAHAP 3 DARI 3 · STORYBOARD PER-SEGMEN (4–7 PANEL)</span>
+          <span className="stepKicker mono">TAHAP 3 DARI 4 · STORYBOARD PER-SEGMEN (4–7 PANEL)</span>
           <h2 className="stepTitle">Storyboard Per-Segmen</h2>
           <p className="stepSubtitle">
             Pecah tiap segmen naskah menjadi <strong>4–7 panel berurutan</strong> lewat tombol{" "}
@@ -635,6 +637,19 @@ export default function StoryboardStep({
               title="Opsional: unduh semua gambar & naskah sebagai ZIP"
             >
               Unduh ZIP
+            </button>
+          ) : null}
+
+          {orderedFrames.length > 0 && onGoToAnimate ? (
+            <button
+              type="button"
+              className="btn btnOk btnSm"
+              onClick={onGoToAnimate}
+              title="Animasikan seluruh storyboard lewat Antigravity, Gemini, atau Omni 1.2 Flash"
+            >
+              <SparklesIcon size={13} />
+              <span>Animasikan (Gemini / Omni 1.2)</span>
+              <ArrowRightIcon size={13} />
             </button>
           ) : null}
         </div>

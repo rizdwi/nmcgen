@@ -3294,9 +3294,266 @@ video {
   cursor: default;
 }
 
+/* ==========================================================================
+   STEP 4: ANIMASI STORYBOARD (ANTIGRAVITY / GEMINI / OMNI 1.2 / ANIMATIC)
+   ========================================================================== */
+
+.animateEngineBar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.animateEngineTab {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 13px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink-muted);
+  text-align: left;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.animateEngineTab:hover {
+  border-color: var(--border-strong);
+  color: var(--ink);
+}
+
+.animateEngineTab[data-active="true"] {
+  border-color: var(--accent);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.animateEngineTop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.animateEngineTop strong {
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+.animateEngineTab > span {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.animateConfigBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.animateConfigGroup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.inlineControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inlineControl .select {
+  width: auto;
+}
+
+.animateHandoffGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.handoffAppRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.omniApiWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.omniKeyCard {
+  border-color: rgba(229, 154, 60, 0.35);
+}
+
+.omniReelCard {
+  border-color: #2f6c4f;
+}
+
+.omniReelStage {
+  display: grid;
+  place-items: center;
+  background: #0a0c0f;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.omniVideoPlayer {
+  width: 100%;
+  max-height: 440px;
+  background: #000;
+  border-radius: var(--radius-sm);
+  display: block;
+}
+
+.omniClipList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.omniClipGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.omniClipCard {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.omniClipCard[data-status="ready"] {
+  border-color: #2f6c4f;
+}
+
+.omniClipCard[data-status="processing"] {
+  border-color: var(--accent);
+}
+
+.omniClipCard[data-status="error"] {
+  border-color: #7d3635;
+}
+
+.omniClipHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.omniThumbRow {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.omniThumbItem {
+  position: relative;
+  width: 78px;
+  height: 48px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  overflow: hidden;
+  background: #0a0c0f;
+  flex-shrink: 0;
+}
+
+.omniThumbItem img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.omniThumbItem span {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(10, 12, 16, 0.85);
+  color: var(--accent-text);
+}
+
+.omniPromptBox {
+  min-height: 92px;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.omniClipVideoBox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Browser Animatic Canvas */
+.animaticCard {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.animaticStageWrap {
+  background: #080a0e;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+}
+
+.animaticCanvas {
+  max-width: 100%;
+  max-height: 540px;
+  height: auto;
+  border-radius: 4px;
+  background: #000;
+}
+
+.animaticProgressTrack {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.animaticProgressFill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 80ms linear;
+}
+
 @media (max-width: 1024px) {
   .scriptLayout,
-  .frameEditorGrid {
+  .frameEditorGrid,
+  .animateHandoffGrid,
+  .animateEngineBar {
     grid-template-columns: 1fr;
   }
 
@@ -3321,7 +3578,8 @@ video {
 
   .storyboardCardGrid,
   .storyboardCardGrid[data-ratio="9:16"],
-  .assetGrid {
+  .assetGrid,
+  .omniClipGrid {
     grid-template-columns: 1fr;
   }
 

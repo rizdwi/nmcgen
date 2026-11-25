@@ -77,6 +77,17 @@ import {
   parseScriptIntoSegments,
   reindexStoryboardFrames,
 } from "./storyboard.ts";
+import {
+  buildAntigravityGeminiHandoff,
+  buildOmniAnimationPackZip,
+  buildOmniBatchJobsJson,
+  buildOmniClipPlans,
+  buildOmniInteractionsPayload,
+  clampOmniDuration,
+  extractOmniVideoFromInteraction,
+  OMNI_MODEL_ID,
+  validateGoogleFileUri,
+} from "./omniAnimation.ts";
 import type { NmcProject, SegmentNodeData } from "./types.ts";
 
 // Synthetic test fixture built in test code only (no hardcoded sample in app source)
@@ -725,5 +736,112 @@ const segMd = buildStoryboardMarkdown(segmentedProject);
 assert.ok(segMd.includes("### Segmen 01: Tiba di Pelabuhan"));
 assert.ok(segMd.includes("#### Panel 2 — Frame 02: Menyusuri Jalan"));
 assert.ok(segMd.includes("### Segmen 02: Menuju Fajar"));
+
+// 15. Step 4 Animation: Antigravity / Gemini Handoff & Gemini Omni 1.2 Flash Interactions API
+assert.equal(OMNI_MODEL_ID, "gemini-omni-1.2-flash");
+assert.equal(clampOmniDuration(20, "segment"), 15);
+assert.equal(clampOmniDuration(15, "transition"), 10, "First+last frame interpolation in Omni 1.2 must cap at 10s");
+assert.equal(clampOmniDuration(14, "extend"), 10, "Video extension in Omni 1.2 must cap at 10s");
+assert.equal(clampOmniDuration(1, "panel"), 3);
+
+// SSRF protection on Google Files API URIs
+assert.equal(
+  validateGoogleFileUri("https://generativelanguage.googleapis.com/v1beta/files/abc123_vid:download?alt=media").ok,
+  true,
+);
+assert.equal(validateGoogleFileUri("https://evil.example.com/v1beta/files/abc123").ok, false);
+assert.equal(validateGoogleFileUri("http://127.0.0.1:8080/v1beta/files/abc").ok, false);
+
+// Attach mock images to reindexed panels to test all 3 clip planning modes
+const renderedSegmented: NmcProject = {
+  ...segmentedProject,
+  storyboard: {
+    ...segmentedProject.storyboard!,
+    frames: segmentedProject.storyboard!.frames.map((f, i) => ({
+      ...f,
+      candidates: [{ id: `anim-c-${i}`, dataUrl: "data:image/jpeg;base64,/9j/4AAQSkZJRg==", createdAt: 10 }],
+      selectedCandidateId: `anim-c-${i}`,
+    })),
+  },
+};
+
+const segPlans = buildOmniClipPlans(renderedSegmented, { mode: "segment", durationSec: 12, resolution: "720p" });
+assert.equal(segPlans.length, 2);
+assert.ok(segPlans[0].images.length <= 6, "Omni 1.2 accepts at most 6 reference images");
+assert.equal(segPlans[0].prompt.includes("<FIRST_FRAME>"), false, "Must never emit deprecated Omni tags");
+assert.ok(segPlans[0].prompt.includes("[0-"), "Segment prompt must include timestamped beat pacing");
+
+const transPlans = buildOmniClipPlans(renderedSegmented, { mode: "transition", durationSec: 15, resolution: "1080p" });
+assert.equal(transPlans[0].durationSec, 10, "Transition mode must clamp duration to 10s max");
+assert.equal(transPlans[0].images.length, 2, "Transition clip pairs Panel 1 -> Panel 2");
+assert.ok(transPlans[0].prompt.includes("Use the first image as the starting frame and the second image as the final frame"));
+
+const panelPlans = buildOmniClipPlans(renderedSegmented, { mode: "panel", durationSec: 6, resolution: "360p" });
+assert.equal(panelPlans.length, 3);
+assert.equal(panelPlans[0].images.length, 1);
+
+const omniPayload = buildOmniInteractionsPayload({
+  prompt: transPlans[0].prompt,
+  images: [{ mimeType: "image/jpeg", data: "/9j/4AAQ==" }],
+  durationSec: 12,
+  resolution: "720p",
+  aspectRatio: "16:9",
+  mode: "transition",
+  previousInteractionId: "v1_prev_123",
+});
+assert.equal(omniPayload.model, "gemini-omni-1.2-flash");
+assert.equal(omniPayload.background, true);
+assert.equal(omniPayload.store, true);
+assert.equal(omniPayload.previous_interaction_id, "v1_prev_123");
+assert.deepEqual(omniPayload.response_format, {
+  type: "video",
+  delivery: "uri",
+  duration: "10s",
+  resolution: "720p",
+  aspect_ratio: "16:9",
+});
+assert.equal("temperature" in omniPayload, false, "Omni 1.2 Interactions API rejects temperature param");
+
+// Parse BOTH official REST steps[] URI response AND inline base64 response
+const parsedRestUri = extractOmniVideoFromInteraction({
+  id: "v1_int_001",
+  status: "completed",
+  steps: [
+    { type: "thought", content: [{ type: "thought", text: "planning" }] },
+    {
+      type: "model_output",
+      content: [
+        {
+          type: "video",
+          mime_type: "video/mp4",
+          uri: "https://generativelanguage.googleapis.com/v1beta/files/vid_001:download?alt=media",
+        },
+      ],
+    },
+  ],
+});
+assert.equal(parsedRestUri.id, "v1_int_001");
+assert.equal(parsedRestUri.done, true);
+assert.equal(parsedRestUri.failed, false);
+assert.ok(parsedRestUri.fileUri?.includes("files/vid_001"));
+
+const parsedInline = extractOmniVideoFromInteraction({
+  id: "v1_int_002",
+  status: "completed",
+  output_video: { mime_type: "video/mp4", data: "AAAAIGZ0eXBpc29t" },
+});
+assert.equal(parsedInline.videoBase64, "AAAAIGZ0eXBpc29t");
+
+const handoffMd = buildAntigravityGeminiHandoff(renderedSegmented, segPlans);
+assert.ok(handoffMd.includes("gemini-omni-1.2-flash"));
+assert.ok(handoffMd.includes("keyframes/S01_P01.jpg"));
+
+const batchJobs = JSON.parse(buildOmniBatchJobsJson(renderedSegmented, transPlans)) as Array<Record<string, unknown>>;
+assert.equal(batchJobs[0].first_frame, "keyframes/S01_P01.jpg");
+assert.equal(batchJobs[0].last_frame, "keyframes/S01_P02.jpg");
+
+const omniZip = buildOmniAnimationPackZip(renderedSegmented, segPlans);
+assert.equal(omniZip[0], 0x50);
+assert.equal(omniZip[1], 0x4b);
 
 console.log("nmcGen pipeline tests: all passed");

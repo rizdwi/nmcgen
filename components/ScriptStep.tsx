@@ -199,7 +199,7 @@ export default function ScriptStep({
     <div className="stepContainer">
       <div className="stepIntroRow">
         <div>
-          <span className="stepKicker mono">TAHAP 1 DARI 3 · NASKAH PER-SEGMEN</span>
+          <span className="stepKicker mono">TAHAP 1 DARI 4 · NASKAH PER-SEGMEN</span>
           <h2 className="stepTitle">Ide Cerita &amp; Naskah Per-Segmen</h2>
           <p className="stepSubtitle">
             Naskah dibagi menjadi beberapa <strong>Segmen</strong>, dan tiap segmen akan dipecah menjadi{" "}

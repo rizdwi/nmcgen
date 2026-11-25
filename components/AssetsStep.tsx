@@ -294,7 +294,7 @@ export default function AssetsStep({
     <div className="stepContainer">
       <div className="stepIntroRow">
         <div>
-          <span className="stepKicker mono">TAHAP 2 DARI 3 · GERBANG ACC</span>
+          <span className="stepKicker mono">TAHAP 2 DARI 4 · GERBANG ACC</span>
           <h2 className="stepTitle">Aset &amp; Karakter Sesuai Naskah</h2>
           <p className="stepSubtitle">
             Semua karakter, lokasi, dan properti di bawah diekstrak langsung dari keseluruhan naskah{" "}

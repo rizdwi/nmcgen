@@ -209,3 +209,38 @@ export function FilmIcon({ size = 15 }: IconProps) {
     </svg>
   );
 }
+
+export function PlayIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M4.5 3.25L12.75 8L4.5 12.75V3.25Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function CopyIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="5.25" y="5.25" width="8.25" height="8.25" rx="1.2" stroke="currentColor" strokeWidth="1.35" />
+      <path d="M10.75 5.25V3.5a1 1 0 00-1-1h-6.25a1 1 0 00-1 1v6.25a1 1 0 001 1h1.75" stroke="currentColor" strokeWidth="1.35" />
+    </svg>
+  );
+}
+
+export function DownloadIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 2.5v7.5M5 7l3 3 3-3" stroke="currentColor" strokeWidth="1.45" strokeLinecap="square" />
+      <path d="M2.5 11.75v1.75h11v-1.75" stroke="currentColor" strokeWidth="1.45" strokeLinecap="square" />
+    </svg>
+  );
+}
+
+export function ExternalLinkIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M9.5 2.5h4v4M13.25 2.75L7.5 8.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="square" />
+      <path d="M12.5 9.25v3.25a1 1 0 01-1 1h-8a1 1 0 01-1-1v-8a1 1 0 011-1h3.25" stroke="currentColor" strokeWidth="1.35" />
+    </svg>
+  );
+}
