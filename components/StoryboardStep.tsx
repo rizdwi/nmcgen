@@ -70,6 +70,11 @@ interface StoryboardStepProps {
 
 const PANEL_COUNT_OPTIONS = [4, 5, 6, 7] as const;
 
+const sleepMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isAuthOrConfigError = (msg: string) =>
+  /401|403|api key|unauthorized|invalid.*key|tidak memiliki|belum dikonfigurasi/i.test(msg);
+
 export default function StoryboardStep({
   project,
   sb,
@@ -94,10 +99,19 @@ export default function StoryboardStep({
   });
   const [busy, setBusy] = useState("");
   const [autoRunning, setAutoRunning] = useState(false);
+  const [autoProgress, setAutoProgress] = useState<{
+    done: number;
+    total: number;
+    segIndex: number;
+    totalSegs: number;
+    panelNum: number;
+    segTarget: number;
+    phase: "planning" | "drawing" | "retrying";
+  } | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [continueNote, setContinueNote] = useState("");
-  const [autoGenOnContinue, setAutoGenOnContinue] = useState(false);
+  const [autoGenOnContinue, setAutoGenOnContinue] = useState(true);
   const [quickEditText, setQuickEditText] = useState("");
   const [showScriptDrawer, setShowScriptDrawer] = useState(false);
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
@@ -374,18 +388,26 @@ export default function StoryboardStep({
         setBusy(
           `Panel ${nextPanelNum}/${targetPanels} (Segmen ${seg.index}) tersusun — menggambar dengan FLUX.2 Klein 4B...`,
         );
-        await runGenerateFrameImage(indexedNewFrame, nextSb);
+        try {
+          await runGenerateFrameImage(indexedNewFrame, nextSb);
+        } catch (firstErr) {
+          const msg = (firstErr as Error).message || "";
+          if (isAuthOrConfigError(msg)) throw firstErr;
+          setBusy(`Mengulang gambar Segmen ${seg.index} · Panel ${nextPanelNum} (FLUX.2 Klein 4B)...`);
+          await sleepMs(1500);
+          await runGenerateFrameImage(indexedNewFrame, latestSbRef.current);
+        }
         if (storyFinished) {
           setNotice(
             `Panel ${nextPanelNum}/${targetPanels} (penutup cerita) selesai digambar! Buka tab Preview Strip untuk melihat papan storyboard lengkap.`,
           );
         } else if (segmentFinished && followingSeg) {
           setNotice(
-            `Segmen ${seg.index} selesai (${nextPanelNum}/${targetPanels} panel)! Klik "Lanjut Segmen ${followingSeg.index}" atau cek Preview Strip.`,
+            `Segmen ${seg.index} selesai (${nextPanelNum}/${targetPanels} panel)! Klik "Generate Semua Sisa" untuk menyelesaikan seluruh segmen otomatis.`,
           );
         } else {
           setNotice(
-            `Segmen ${seg.index} · Panel ${nextPanelNum}/${targetPanels} berhasil dibuat & digambar. Klik Continue untuk Panel ${nextPanelNum + 1}.`,
+            `Segmen ${seg.index} · Panel ${nextPanelNum}/${targetPanels} berhasil dibuat & digambar.`,
           );
         }
       } else {
@@ -583,13 +605,43 @@ export default function StoryboardStep({
     downloadBlob(new Blob([copy], { type: "application/zip" }), safeName);
   };
 
-  // Auto-generate all remaining panels (plan + FLUX.2 4B image) for a segment with live Stop support
-  const handleAutoGenerateSegment = async (targetSegOverride?: StorySegment) => {
-    const seg = targetSegOverride ?? activeSegment;
-    if (!seg) return;
+  // True 1-Tap Automation: plan + draw FLUX.2 4B panels continuously across ALL segments (or a single segment)
+  // without requiring repeated Continue / Next Segment / Generate (4B) taps.
+  const handleAutoGenerateAllSegments = async (options?: {
+    onlySingleSegment?: boolean;
+    targetSegment?: StorySegment;
+    initialDirection?: string;
+  }) => {
+    const onlySingle = Boolean(options?.onlySingleSegment);
     const curSb0 = latestSbRef.current;
-    if (!curSb0.scriptText.trim() && !seg.scriptContent.trim()) {
+    const allSegs0 = getStoryboardSegments(curSb0);
+    const targetSegments = onlySingle
+      ? [options?.targetSegment ?? activeSegment ?? allSegs0[0]].filter((s): s is StorySegment => Boolean(s))
+      : allSegs0;
+
+    if (targetSegments.length === 0) return;
+    if (!curSb0.scriptText.trim() && targetSegments.every((s) => !s.scriptContent.trim())) {
       setError("Naskah kosong. Kembali ke Tahap 1 untuk mengisi naskah terlebih dahulu.");
+      return;
+    }
+
+    // Calculate total panels we expect to draw across the chosen scope
+    const ordered0 = reindexStoryboardFrames(curSb0.frames, allSegs0);
+    let totalWork = 0;
+    for (const seg of targetSegments) {
+      const segFrames = ordered0.filter((f) => f.segmentId === seg.id);
+      const target = clampTargetPanels(seg.targetPanels);
+      const undrawn = segFrames.filter((f) => !getSelectedFrameImage(f)).length;
+      const missing = Math.max(0, target - segFrames.length);
+      totalWork += undrawn + missing;
+    }
+
+    if (totalWork === 0) {
+      setNotice(
+        onlySingle
+          ? `Segmen ${targetSegments[0].index} sudah lengkap semua panel & gambarnya.`
+          : `Seluruh ${allSegs0.length} segmen sudah lengkap semua panel & gambarnya!`,
+      );
       return;
     }
 
@@ -598,91 +650,207 @@ export default function StoryboardStep({
     setError("");
     setNotice("");
 
-    const targetPanels = clampTargetPanels(seg.targetPanels);
-    let generatedCount = 0;
+    let doneCount = 0;
+    let firstDirection = (options?.initialDirection ?? "").trim();
+    if (firstDirection) setContinueNote("");
+
+    let lastSegIndex = targetSegments[0].index;
+    let lastPanelNum = 1;
 
     try {
-      while (!autoStopRef.current) {
-        const curSb = latestSbRef.current;
-        const segs = getStoryboardSegments(curSb);
-        const orderedNow = reindexStoryboardFrames(curSb.frames, segs);
-        const segFramesNow = orderedNow.filter((f) => f.segmentId === seg.id);
-
-        // First render any existing un-drawn panel inside this segment before creating new ones
-        const undrawn = segFramesNow.find((f) => !getSelectedFrameImage(f));
-        if (undrawn) {
-          const pNum = undrawn.panelNumber ?? 1;
-          setActiveSegmentId(seg.id);
-          setActiveFrameId(undrawn.id);
-          setBusy(`Auto Segmen ${seg.index}: menggambar Panel ${pNum}/${targetPanels} (FLUX.2 Klein 4B)...`);
-          await runGenerateFrameImage(undrawn, curSb);
-          generatedCount += 1;
-          continue;
-        }
-
-        if (segFramesNow.length >= targetPanels) break;
-
-        const nextPanelNum = segFramesNow.length + 1;
-        setBusy(`Auto Segmen ${seg.index}: menyusun Panel ${nextPanelNum}/${targetPanels}...`);
-
-        const built = buildNextFramePrompt({
-          projectName: project.name,
-          scriptText: curSb.scriptText,
-          visualStyle: curSb.visualStyle,
-          aspectRatio: curSb.aspectRatio,
-          approvedAssets,
-          previousFrames: orderedNow,
-          activeSegment: seg,
-          segmentFrames: segFramesNow,
-          totalSegments: segs.length,
-        });
-        const res = await callAi(textProfile, "text", built);
-        if (res.discovered) onSyncDiscoveredModels(textProfile.id, res.discovered);
-        if (!res.ok || !res.text) {
-          throw new Error(res.error || `Gagal menyusun Panel ${nextPanelNum}.`);
-        }
-
-        const { frame, storyFinished } = parseNextFrameResponse(res.text, approvedAssets, orderedNow, {
-          activeSegment: seg,
-          segmentFrames: segFramesNow,
-        });
-
-        const cleanFrames = commitFrames([...orderedNow, frame], { storyFinished }, segs);
-        const indexedFrame = cleanFrames.find((f) => f.id === frame.id) ?? frame;
-        const nextSb: StoryboardData = {
-          ...latestSbRef.current,
-          segments: segs,
-          frames: cleanFrames,
-          storyFinished,
-        };
-        setActiveSegmentId(seg.id);
-        setActiveFrameId(indexedFrame.id);
-
+      for (const seg of targetSegments) {
         if (autoStopRef.current) break;
+        const targetPanels = clampTargetPanels(seg.targetPanels);
+        lastSegIndex = seg.index;
 
-        setBusy(`Auto Segmen ${seg.index}: menggambar Panel ${nextPanelNum}/${targetPanels} (FLUX.2 Klein 4B)...`);
-        await runGenerateFrameImage(indexedFrame, nextSb);
-        generatedCount += 1;
+        while (!autoStopRef.current) {
+          const curSb = latestSbRef.current;
+          const segs = getStoryboardSegments(curSb);
+          const orderedNow = reindexStoryboardFrames(curSb.frames, segs);
+          const segFramesNow = orderedNow.filter((f) => f.segmentId === seg.id);
+
+          // 1. Always render any existing panel in this segment that still has no image
+          const undrawn = segFramesNow.find((f) => !getSelectedFrameImage(f));
+          if (undrawn) {
+            const pNum = undrawn.panelNumber ?? 1;
+            lastPanelNum = pNum;
+            setActiveSegmentId(seg.id);
+            setActiveFrameId(undrawn.id);
+            setAutoProgress({
+              done: doneCount,
+              total: totalWork,
+              segIndex: seg.index,
+              totalSegs: segs.length,
+              panelNum: pNum,
+              segTarget: targetPanels,
+              phase: "drawing",
+            });
+            setBusy(
+              `Auto (${doneCount + 1}/${totalWork}) · Segmen ${seg.index}/${segs.length} · Menggambar Panel ${pNum}/${targetPanels} (FLUX.2 4B)...`,
+            );
+
+            try {
+              await runGenerateFrameImage(undrawn, curSb);
+            } catch (firstErr) {
+              const msg = (firstErr as Error).message || "";
+              if (autoStopRef.current || isAuthOrConfigError(msg)) throw firstErr;
+              setAutoProgress({
+                done: doneCount,
+                total: totalWork,
+                segIndex: seg.index,
+                totalSegs: segs.length,
+                panelNum: pNum,
+                segTarget: targetPanels,
+                phase: "retrying",
+              });
+              setBusy(`Koneksi sempat terputus — mengulang gambar Segmen ${seg.index} · Panel ${pNum}...`);
+              await sleepMs(1500);
+              if (autoStopRef.current) break;
+              await runGenerateFrameImage(undrawn, latestSbRef.current);
+            }
+
+            doneCount += 1;
+            continue;
+          }
+
+          // 2. Segment already has all target panels drawn -> automatically advance to next segment!
+          if (segFramesNow.length >= targetPanels) break;
+
+          // 3. Plan next panel AND immediately draw its FLUX.2 4B image in one seamless cycle
+          const nextPanelNum = segFramesNow.length + 1;
+          lastPanelNum = nextPanelNum;
+          setActiveSegmentId(seg.id);
+          setAutoProgress({
+            done: doneCount,
+            total: totalWork,
+            segIndex: seg.index,
+            totalSegs: segs.length,
+            panelNum: nextPanelNum,
+            segTarget: targetPanels,
+            phase: "planning",
+          });
+          setBusy(
+            `Auto (${doneCount + 1}/${totalWork}) · Segmen ${seg.index}/${segs.length} · Menyusun Panel ${nextPanelNum}/${targetPanels}...`,
+          );
+
+          const built = buildNextFramePrompt({
+            projectName: project.name,
+            scriptText: curSb.scriptText,
+            visualStyle: curSb.visualStyle,
+            aspectRatio: curSb.aspectRatio,
+            approvedAssets,
+            previousFrames: orderedNow,
+            activeSegment: seg,
+            segmentFrames: segFramesNow,
+            totalSegments: segs.length,
+            userDirection: firstDirection,
+          });
+          firstDirection = "";
+
+          let res = await callAi(textProfile, "text", built);
+          if (res.discovered) onSyncDiscoveredModels(textProfile.id, res.discovered);
+          if ((!res.ok || !res.text) && !autoStopRef.current && !isAuthOrConfigError(res.error || "")) {
+            setBusy(`Mengulang penyusunan Segmen ${seg.index} · Panel ${nextPanelNum}...`);
+            await sleepMs(1500);
+            if (!autoStopRef.current) {
+              res = await callAi(textProfile, "text", built);
+              if (res.discovered) onSyncDiscoveredModels(textProfile.id, res.discovered);
+            }
+          }
+          if (!res.ok || !res.text) {
+            throw new Error(res.error || `Gagal menyusun Segmen ${seg.index} · Panel ${nextPanelNum}.`);
+          }
+
+          const { frame, storyFinished } = parseNextFrameResponse(res.text, approvedAssets, orderedNow, {
+            activeSegment: seg,
+            segmentFrames: segFramesNow,
+          });
+
+          const cleanFrames = commitFrames([...orderedNow, frame], { storyFinished }, segs);
+          const indexedFrame = cleanFrames.find((f) => f.id === frame.id) ?? frame;
+          const nextSb: StoryboardData = {
+            ...latestSbRef.current,
+            segments: segs,
+            frames: cleanFrames,
+            storyFinished,
+          };
+          setActiveSegmentId(seg.id);
+          setActiveFrameId(indexedFrame.id);
+
+          if (autoStopRef.current) break;
+
+          setAutoProgress({
+            done: doneCount,
+            total: totalWork,
+            segIndex: seg.index,
+            totalSegs: segs.length,
+            panelNum: nextPanelNum,
+            segTarget: targetPanels,
+            phase: "drawing",
+          });
+          setBusy(
+            `Auto (${doneCount + 1}/${totalWork}) · Segmen ${seg.index}/${segs.length} · Menggambar Panel ${nextPanelNum}/${targetPanels} (FLUX.2 4B)...`,
+          );
+
+          try {
+            await runGenerateFrameImage(indexedFrame, nextSb);
+          } catch (firstErr) {
+            const msg = (firstErr as Error).message || "";
+            if (autoStopRef.current || isAuthOrConfigError(msg)) throw firstErr;
+            setAutoProgress({
+              done: doneCount,
+              total: totalWork,
+              segIndex: seg.index,
+              totalSegs: segs.length,
+              panelNum: nextPanelNum,
+              segTarget: targetPanels,
+              phase: "retrying",
+            });
+            setBusy(`Koneksi sempat terputus — mengulang gambar Segmen ${seg.index} · Panel ${nextPanelNum}...`);
+            await sleepMs(1500);
+            if (autoStopRef.current) break;
+            await runGenerateFrameImage(indexedFrame, latestSbRef.current);
+          }
+
+          doneCount += 1;
+        }
       }
 
       if (autoStopRef.current) {
-        setNotice(`Auto-generate dihentikan (${generatedCount} panel selesai dibuat di Segmen ${seg.index}).`);
-      } else {
         setNotice(
-          `Segmen ${seg.index} selesai lengkap (${targetPanels} panel)! Buka Preview Strip untuk melihat papan horizontal atau unduh gambarnya.`,
+          `Auto-generate dijeda (${doneCount}/${totalWork} panel selesai & tersimpan). Klik "Generate Semua Sisa" kapan saja untuk melanjutkan.`,
+        );
+      } else if (onlySingle) {
+        setNotice(
+          `Segmen ${targetSegments[0].index} selesai lengkap (${clampTargetPanels(targetSegments[0].targetPanels)} panel tergambar)!`,
+        );
+      } else {
+        onPatchSb({ storyFinished: true });
+        setNotice(
+          `Selesai! Seluruh ${allSegs0.length} segmen (${doneCount} panel baru) berhasil disusun & digambar otomatis. Cek Preview Strip atau lanjut ke Tahap 4 Animasi!`,
         );
       }
     } catch (err) {
-      setError((err as Error).message);
+      setError(
+        `Terhenti di Segmen ${lastSegIndex} · Panel ${lastPanelNum}: ${(err as Error).message}. Progress sebelumnya aman tersimpan — klik "Generate Semua Sisa" untuk melanjutkan.`,
+      );
     } finally {
       setAutoRunning(false);
+      setAutoProgress(null);
       setBusy("");
     }
   };
 
+  const handleAutoGenerateSegment = async (targetSegOverride?: StorySegment) => {
+    await handleAutoGenerateAllSegments({
+      onlySingleSegment: true,
+      targetSegment: targetSegOverride ?? activeSegment,
+    });
+  };
+
   const handleStopAutoSegment = () => {
     autoStopRef.current = true;
-    setNotice("Menghentikan setelah langkah saat ini selesai...");
+    setNotice("Menghentikan setelah panel yang sedang diproses selesai...");
   };
 
   const handleExportSegmentStrip = async (seg: StorySegment) => {
@@ -733,7 +901,31 @@ export default function StoryboardStep({
   const approvedFrameCount = orderedFrames.filter((f) => f.approved).length;
   const totalTargetPanels = segments.reduce((sum, s) => sum + clampTargetPanels(s.targetPanels), 0);
   const activeSegTarget = activeSegment ? clampTargetPanels(activeSegment.targetPanels) : 5;
-  const activeSegCompleted = activeSegmentFrames.length >= activeSegTarget;
+  const activeSegUndrawn = activeSegmentFrames.filter((f) => !getSelectedFrameImage(f)).length;
+  const activeSegNeed = Math.max(0, activeSegTarget - activeSegmentFrames.length) + activeSegUndrawn;
+  const activeSegCompleted = activeSegmentFrames.length >= activeSegTarget && activeSegUndrawn === 0;
+
+  const remainingStats = useMemo(() => {
+    let remainingPanels = 0;
+    let remainingSegments = 0;
+    let drawnPanels = 0;
+    let totalPanels = 0;
+
+    for (const seg of segments) {
+      const segFrames = orderedFrames.filter((f) => f.segmentId === seg.id);
+      const target = clampTargetPanels(seg.targetPanels);
+      const drawn = segFrames.filter((f) => Boolean(getSelectedFrameImage(f))).length;
+      const undrawn = segFrames.length - drawn;
+      const missing = Math.max(0, target - segFrames.length);
+      const need = undrawn + missing;
+      drawnPanels += drawn;
+      totalPanels += Math.max(target, segFrames.length);
+      remainingPanels += need;
+      if (need > 0) remainingSegments += 1;
+    }
+
+    return { remainingPanels, remainingSegments, drawnPanels, totalPanels };
+  }, [segments, orderedFrames]);
 
   const lightboxFrame = lightboxIdx !== null ? orderedFrames[lightboxIdx] ?? null : null;
   const lightboxSegment = lightboxFrame
@@ -751,10 +943,9 @@ export default function StoryboardStep({
           <span className="stepKicker mono">TAHAP 3 DARI 4 · STORYBOARD PER-SEGMEN (4–7 PANEL)</span>
           <h2 className="stepTitle">Storyboard Per-Segmen</h2>
           <p className="stepSubtitle">
-            Pecah tiap segmen naskah menjadi <strong>4–7 panel berurutan</strong> lewat tombol{" "}
-            <strong>Continue</strong> (mengacu pada <strong>{approvedAssets.length} aset ACC</strong>) agar gerakan
-            mengalir mulus tanpa lompat-lompat. Buka <strong>Preview Strip</strong> untuk melihat papan storyboard
-            horizontal tiap segmen.
+            Klik <strong>Generate Semua Segmen</strong> sekali saja untuk menyusun &amp; menggambar otomatis seluruh{" "}
+            <strong>{segments.length} segmen ({totalTargetPanels} panel)</strong> dengan{" "}
+            <strong>{approvedAssets.length} aset ACC</strong> tanpa perlu klik Continue berulang kali.
           </p>
         </div>
 
@@ -781,6 +972,23 @@ export default function StoryboardStep({
               <span>Preview Strip ({orderedFrames.length})</span>
             </button>
           </div>
+
+          {autoRunning ? (
+            <button type="button" className="btn btnDanger btnSm" onClick={handleStopAutoSegment}>
+              Hentikan Auto
+            </button>
+          ) : remainingStats.remainingPanels > 0 ? (
+            <button
+              type="button"
+              className="btn btnPrimary btnSm"
+              disabled={Boolean(busy)}
+              onClick={() => void handleAutoGenerateAllSegments({ onlySingleSegment: false })}
+              title="Susun & gambar otomatis seluruh sisa panel di semua segmen"
+            >
+              <SparklesIcon size={13} />
+              <span>Generate Semua ({remainingStats.remainingPanels} Panel)</span>
+            </button>
+          ) : null}
 
           <button type="button" className="btn btnSm" onClick={() => setShowScriptDrawer((v) => !v)}>
             {showScriptDrawer ? "Tutup Naskah" : "Lihat Naskah"}
@@ -812,12 +1020,48 @@ export default function StoryboardStep({
         </div>
       </div>
 
-      {busy ? (
+      {autoRunning && autoProgress ? (
+        <div className="autoProgressCard" role="status" aria-live="polite">
+          <div className="autoProgressHead">
+            <div>
+              <strong>
+                Segmen {autoProgress.segIndex}/{autoProgress.totalSegs} · Panel {autoProgress.panelNum}/
+                {autoProgress.segTarget}
+              </strong>{" "}
+              <span className="fieldHint">
+                (
+                {autoProgress.phase === "planning"
+                  ? "Menyusun adegan..."
+                  : autoProgress.phase === "retrying"
+                    ? "Mengulang koneksi otomatis..."
+                    : "Menggambar FLUX.2 Klein 4B..."}
+                )
+              </span>
+            </div>
+            <div className="actionGroup">
+              <span className="metaTag mono">
+                {autoProgress.done}/{autoProgress.total} selesai
+              </span>
+              <button type="button" className="btn btnDanger btnSm" onClick={handleStopAutoSegment}>
+                Hentikan
+              </button>
+            </div>
+          </div>
+          <div className="autoProgressTrack">
+            <div
+              className="autoProgressFill"
+              style={{
+                width: `${Math.min(100, Math.max(4, Math.round(((autoProgress.done + 0.35) / Math.max(1, autoProgress.total)) * 100)))}%`,
+              }}
+            />
+          </div>
+        </div>
+      ) : busy ? (
         <div className="alertBox" role="status" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
           <span>{busy}</span>
           {autoRunning ? (
             <button type="button" className="btn btnDanger btnSm" onClick={handleStopAutoSegment}>
-              Hentikan Auto
+              Hentikan
             </button>
           ) : null}
         </div>
@@ -879,11 +1123,26 @@ export default function StoryboardStep({
 
           <div className="cardsPreviewMeta">
             <span className="mono">
-              {segments.length} Segmen · {orderedFrames.length}/{totalTargetPanels} Panel · {approvedFrameCount} ACC ·
-              Rasio {sb.aspectRatio}
+              {segments.length} Segmen · {remainingStats.drawnPanels}/{remainingStats.totalPanels} Panel Tergambar ·{" "}
+              {approvedFrameCount} ACC · Rasio {sb.aspectRatio}
             </span>
 
             <div className="actionGroup">
+              {autoRunning ? (
+                <button type="button" className="btn btnDanger btnSm" onClick={handleStopAutoSegment}>
+                  Hentikan Auto
+                </button>
+              ) : remainingStats.remainingPanels > 0 ? (
+                <button
+                  type="button"
+                  className="btn btnPrimary btnSm"
+                  disabled={Boolean(busy)}
+                  onClick={() => void handleAutoGenerateAllSegments({ onlySingleSegment: false })}
+                >
+                  <SparklesIcon size={13} />
+                  <span>Generate Semua Sisa ({remainingStats.remainingPanels} Panel)</span>
+                </button>
+              ) : null}
               {orderedFrames.length > 0 ? (
                 <button
                   type="button"
@@ -923,9 +1182,11 @@ export default function StoryboardStep({
             <div className="segmentStripStack">
               {segments.map((seg) => {
                 const segFrames = orderedFrames.filter((f) => f.segmentId === seg.id);
+                const segDrawn = segFrames.filter((f) => Boolean(getSelectedFrameImage(f))).length;
                 const targetCount = clampTargetPanels(seg.targetPanels);
+                const segNeed = Math.max(0, targetCount - segFrames.length) + (segFrames.length - segDrawn);
                 const slotCount = Math.max(targetCount, segFrames.length);
-                const isDone = segFrames.length >= targetCount;
+                const isDone = segFrames.length >= targetCount && segDrawn >= targetCount;
 
                 return (
                   <section key={seg.id} className="segmentStripBoard" aria-label={`Storyboard Segmen ${seg.index}`}>
@@ -942,7 +1203,7 @@ export default function StoryboardStep({
                         <span className="statusBadge mono" data-tone={isDone ? "ok" : "warn"}>
                           {isDone ? <CheckIcon size={11} /> : null}
                           <span>
-                            {segFrames.length}/{targetCount} Panel
+                            {segDrawn}/{targetCount} Panel
                           </span>
                         </span>
                         {segFrames.length > 0 ? (
@@ -967,10 +1228,21 @@ export default function StoryboardStep({
                         >
                           Buka Editor
                         </button>
-                        {segFrames.length < 7 ? (
+                        {segNeed > 0 ? (
                           <button
                             type="button"
                             className="btn btnPrimary btnSm"
+                            disabled={Boolean(busy)}
+                            onClick={() => void handleAutoGenerateSegment(seg)}
+                            title={`Susun & gambar otomatis semua sisa panel Segmen ${seg.index}`}
+                          >
+                            <SparklesIcon size={13} />
+                            <span>Auto Lengkapi ({segNeed})</span>
+                          </button>
+                        ) : segFrames.length < 7 ? (
+                          <button
+                            type="button"
+                            className="btn btnSm"
                             disabled={Boolean(busy)}
                             onClick={() => void handleContinueNextFrame(seg)}
                           >
@@ -1103,10 +1375,10 @@ export default function StoryboardStep({
                           type="button"
                           className="btn btnPrimary btnSm"
                           disabled={Boolean(busy)}
-                          onClick={() => void handleContinueNextFrame(seg)}
+                          onClick={() => void handleAutoGenerateSegment(seg)}
                         >
                           <SparklesIcon size={14} />
-                          <span>Buat Panel 1 Segmen {seg.index}</span>
+                          <span>Auto-Buat Segmen {seg.index} ({targetCount} Panel)</span>
                         </button>
                       </div>
                     ) : (
@@ -1217,9 +1489,11 @@ export default function StoryboardStep({
           {/* Segment Switcher Tabs Bar */}
           <div className="segmentTabBar" role="tablist" aria-label="Pilih segmen naskah">
             {segments.map((seg) => {
-              const segCount = orderedFrames.filter((f) => f.segmentId === seg.id).length;
+              const segFrames = orderedFrames.filter((f) => f.segmentId === seg.id);
+              const segCount = segFrames.length;
+              const segDrawn = segFrames.filter((f) => Boolean(getSelectedFrameImage(f))).length;
               const target = clampTargetPanels(seg.targetPanels);
-              const done = segCount >= target;
+              const done = segCount >= target && segDrawn >= target;
               const selected = activeSegment?.id === seg.id;
               return (
                 <button
@@ -1236,7 +1510,7 @@ export default function StoryboardStep({
                     <span className="mono segmentTabNum">SEGMEN {String(seg.index).padStart(2, "0")}</span>
                     <span className="mono segmentTabCount" data-done={done}>
                       {done ? <CheckIcon size={10} /> : null}
-                      {segCount}/{target}
+                      {segDrawn}/{target}
                     </span>
                   </div>
                   <span className="segmentTabTitle">{seg.title}</span>
@@ -1283,25 +1557,32 @@ export default function StoryboardStep({
                   <button type="button" className="btn btnDanger btnSm" onClick={handleStopAutoSegment}>
                     Hentikan Auto
                   </button>
-                ) : activeSegmentFrames.length < activeSegTarget ||
-                  activeSegmentFrames.some((f) => !getSelectedFrameImage(f)) ? (
-                  <button
-                    type="button"
-                    className="btn btnSm"
-                    disabled={Boolean(busy)}
-                    onClick={() => void handleAutoGenerateSegment(activeSegment)}
-                    title={`Susun dan gambar otomatis sisa panel Segmen ${activeSegment.index} hingga ${activeSegTarget} panel`}
-                  >
-                    <SparklesIcon size={13} />
-                    <span>
-                      Auto-Buat Sisa (
-                      {Math.max(
-                        activeSegTarget - activeSegmentFrames.length,
-                        activeSegmentFrames.filter((f) => !getSelectedFrameImage(f)).length,
-                      )}{" "}
-                      Panel)
-                    </span>
-                  </button>
+                ) : remainingStats.remainingPanels > 0 ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btnPrimary btnSm"
+                      disabled={Boolean(busy)}
+                      onClick={() => void handleAutoGenerateAllSegments({ onlySingleSegment: false })}
+                      title="Susun & gambar otomatis seluruh panel di semua segmen sekaligus tanpa perlu klik ulang"
+                    >
+                      <SparklesIcon size={13} />
+                      <span>
+                        Generate Semua Segmen ({remainingStats.remainingPanels} Panel)
+                      </span>
+                    </button>
+                    {segments.length > 1 && activeSegNeed > 0 ? (
+                      <button
+                        type="button"
+                        className="btn btnSm"
+                        disabled={Boolean(busy)}
+                        onClick={() => void handleAutoGenerateSegment(activeSegment)}
+                        title={`Susun & gambar otomatis sisa panel Segmen ${activeSegment.index} saja`}
+                      >
+                        <span>Segmen {activeSegment.index} Saja ({activeSegNeed})</span>
+                      </button>
+                    ) : null}
+                  </>
                 ) : null}
               </div>
             </div>
@@ -1351,7 +1632,7 @@ export default function StoryboardStep({
                 className="filmstripContinueCard"
                 disabled={Boolean(busy)}
                 onClick={() => void handleContinueNextFrame()}
-                title={`Lanjutkan ke Panel ${activeSegmentFrames.length + 1} di Segmen ${activeSegment?.index ?? 1}`}
+                title={`Susun & gambar Panel ${activeSegmentFrames.length + 1} di Segmen ${activeSegment?.index ?? 1}`}
               >
                 <PlusIcon size={16} />
                 <span>
@@ -1367,8 +1648,15 @@ export default function StoryboardStep({
                 type="button"
                 className="filmstripNextSegCard"
                 disabled={Boolean(busy)}
-                onClick={() => handleSelectSegment(nextSegment.id)}
-                title={`Pindah ke Segmen ${nextSegment.index}: ${nextSegment.title}`}
+                onClick={() => {
+                  const nextFrames = orderedFrames.filter((f) => f.segmentId === nextSegment.id);
+                  if (nextFrames.length === 0) {
+                    void handleContinueNextFrame(nextSegment);
+                  } else {
+                    handleSelectSegment(nextSegment.id);
+                  }
+                }}
+                title={`Lanjut ke Segmen ${nextSegment.index}: ${nextSegment.title}`}
               >
                 <ArrowRightIcon size={16} />
                 <span>Segmen {nextSegment.index}</span>
@@ -1379,17 +1667,20 @@ export default function StoryboardStep({
           {!activeFrame ? (
             <div className="emptyPanel">
               <h3>
-                Segmen {activeSegment?.index ?? 1}: {activeSegment?.title || "Siap Membuat Panel 1"}
+                Segmen {activeSegment?.index ?? 1}: {activeSegment?.title || "Siap Membuat Storyboard"}
               </h3>
               <p>
-                Segmen ini akan dipecah menjadi <strong>{activeSegTarget} panel berurutan</strong> (bisa diubah 4–7
-                panel di atas) menggunakan <strong>{approvedAssets.length} aset ACC</strong> agar tiap gerakan mengalir
-                mulus tanpa melompat.
+                Tekan tombol di bawah sekali saja untuk menyusun &amp; menggambar otomatis{" "}
+                <strong>
+                  seluruh {remainingStats.remainingSegments} segmen ({remainingStats.remainingPanels} panel)
+                </strong>{" "}
+                dengan FLUX.2 Klein 4B mengacu pada <strong>{approvedAssets.length} aset ACC</strong> — tanpa perlu
+                klik Continue atau Generate satu per satu.
               </p>
 
               <div className="continueEmptyControls">
                 <input
-                  aria-label="Arahan opsional untuk Panel 1"
+                  aria-label="Arahan opsional untuk panel awal"
                   className="input"
                   value={continueNote}
                   disabled={Boolean(busy)}
@@ -1397,50 +1688,67 @@ export default function StoryboardStep({
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       e.preventDefault();
-                      void handleContinueNextFrame();
+                      void handleAutoGenerateAllSegments({
+                        onlySingleSegment: false,
+                        initialDirection: continueNote,
+                      });
                     }
                   }}
-                  placeholder={`Arahan opsional untuk Panel 1 Segmen ${activeSegment?.index ?? 1} (kosongkan agar AI mulai tepat dari awal segmen)...`}
+                  placeholder={`Arahan opsional (kosongkan agar AI langsung menggambar seluruh segmen sesuai naskah)...`}
                 />
-                <label className="checkRow">
-                  <input
-                    type="checkbox"
-                    checked={autoGenOnContinue}
-                    onChange={(e) => setAutoGenOnContinue(e.target.checked)}
-                  />
-                  <span>Langsung generate gambar (FLUX.2 Klein 4B)</span>
-                </label>
                 <div className="actionGroup" style={{ justifyContent: "center" }}>
                   <button
                     type="button"
                     className="btn btnPrimary btnLg"
                     disabled={Boolean(busy)}
-                    onClick={() => void handleContinueNextFrame()}
+                    onClick={() =>
+                      void handleAutoGenerateAllSegments({
+                        onlySingleSegment: false,
+                        initialDirection: continueNote,
+                      })
+                    }
                   >
                     <SparklesIcon size={15} />
                     <span>
-                      Buat Panel 1/{activeSegTarget} (Segmen {activeSegment?.index ?? 1})
+                      Generate Seluruh Segmen ({remainingStats.remainingPanels} Panel · {remainingStats.remainingSegments}{" "}
+                      Segmen)
                     </span>
                     <ArrowRightIcon size={15} />
                   </button>
-                  {activeSegment ? (
+                  {segments.length > 1 && activeSegment ? (
                     <button
                       type="button"
                       className="btn btnOk btnLg"
                       disabled={Boolean(busy)}
-                      onClick={() => void handleAutoGenerateSegment(activeSegment)}
+                      onClick={() =>
+                        void handleAutoGenerateAllSegments({
+                          onlySingleSegment: true,
+                          targetSegment: activeSegment,
+                          initialDirection: continueNote,
+                        })
+                      }
                     >
                       <SparklesIcon size={15} />
-                      <span>Auto-Buat {activeSegTarget} Panel Langsung</span>
+                      <span>
+                        Segmen {activeSegment.index} Saja ({activeSegNeed} Panel)
+                      </span>
                     </button>
                   ) : null}
                   <button
                     type="button"
                     className="btn"
                     disabled={Boolean(busy)}
+                    onClick={() => void handleContinueNextFrame()}
+                  >
+                    Buat 1 Panel Dulu
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btnGhost"
+                    disabled={Boolean(busy)}
                     onClick={handleAddBlankFrame}
                   >
-                    Tambah Panel Kosong Manual
+                    Panel Kosong Manual
                   </button>
                 </div>
               </div>
@@ -1611,71 +1919,142 @@ export default function StoryboardStep({
                   ) : null}
                 </section>
 
-                {/* DEDICATED CONTINUE NEXT PANEL / NEXT SEGMENT BAR */}
-                <section className="panelCard continueCard" aria-label="Lanjutkan panel berikutnya">
+                {/* DEDICATED 1-TAP AUTO-GENERATE ALL SEGMENTS / CONTINUE BAR */}
+                <section className="panelCard continueCard" aria-label="Generate otomatis seluruh segmen">
                   <div className="panelHead">
                     <h3>
-                      {activeSegCompleted
-                        ? `Segmen ${activeSegment?.index ?? 1} Tercapai (${activeSegmentFrames.length}/${activeSegTarget} Panel)`
-                        : `Lanjutkan Segmen ${activeSegment?.index ?? 1} (Continue)`}
+                      {remainingStats.remainingPanels === 0
+                        ? `Semua Segmen Lengkap (${remainingStats.drawnPanels}/${remainingStats.totalPanels} Panel)`
+                        : "Generate Otomatis Seluruh Segmen"}
                     </h3>
-                    {activeSegCompleted ? (
+                    {remainingStats.remainingPanels === 0 ? (
                       <span className="statusBadge" data-tone="ok">
-                        <CheckIcon size={12} /> Segmen Selesai
+                        <CheckIcon size={12} /> Storyboard Lengkap
                       </span>
                     ) : (
                       <span className="metaTag mono">
-                        Sisa {activeSegTarget - activeSegmentFrames.length} panel di segmen ini
+                        Sisa {remainingStats.remainingPanels} panel · {remainingStats.remainingSegments} segmen
                       </span>
                     )}
                   </div>
 
-                  <div className="continueRow">
-                    <input
-                      aria-label="Arahan opsional panel berikutnya"
-                      className="input"
-                      value={continueNote}
-                      disabled={Boolean(busy)}
-                      onChange={(e) => setContinueNote(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          void handleContinueNextFrame();
-                        }
-                      }}
-                      placeholder={`Arahan untuk Panel ${activeSegmentFrames.length + 1} di Segmen ${activeSegment?.index ?? 1} (opsional)...`}
-                    />
-
-                    {activeSegCompleted && nextSegment ? (
-                      <button
-                        type="button"
-                        className="btn btnOk"
+                  {remainingStats.remainingPanels > 0 ? (
+                    <div className="continueRow">
+                      <input
+                        aria-label="Arahan opsional panel berikutnya"
+                        className="input"
+                        value={continueNote}
                         disabled={Boolean(busy)}
-                        onClick={() => handleSelectSegment(nextSegment.id)}
-                      >
-                        <span>Lanjut Segmen {nextSegment.index}</span>
-                        <ArrowRightIcon size={15} />
-                      </button>
-                    ) : null}
+                        onChange={(e) => setContinueNote(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void handleAutoGenerateAllSegments({
+                              onlySingleSegment: false,
+                              initialDirection: continueNote,
+                            });
+                          }
+                        }}
+                        placeholder="Arahan opsional untuk panel berikutnya (kosongkan untuk langsung jalan sesuai naskah)..."
+                      />
 
-                    {activeSegmentFrames.length < 7 ? (
-                      <button
-                        type="button"
-                        className={activeSegCompleted && nextSegment ? "btn" : "btn btnPrimary"}
-                        disabled={Boolean(busy)}
-                        onClick={() => void handleContinueNextFrame()}
-                      >
-                        <span>
-                          {activeSegCompleted
-                            ? `+ Panel ${activeSegmentFrames.length + 1}`
-                            : `Continue → Panel ${activeSegmentFrames.length + 1}/${activeSegTarget}`}
-                        </span>
-                        {!activeSegCompleted ? <ArrowRightIcon size={15} /> : null}
+                      {autoRunning ? (
+                        <button type="button" className="btn btnDanger" onClick={handleStopAutoSegment}>
+                          Hentikan ({autoProgress ? `${autoProgress.done}/${autoProgress.total}` : "..."})
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btnPrimary"
+                          disabled={Boolean(busy)}
+                          onClick={() =>
+                            void handleAutoGenerateAllSegments({
+                              onlySingleSegment: false,
+                              initialDirection: continueNote,
+                            })
+                          }
+                        >
+                          <SparklesIcon size={15} />
+                          <span>
+                            Generate Semua Sisa ({remainingStats.remainingPanels} Panel ·{" "}
+                            {remainingStats.remainingSegments} Segmen)
+                          </span>
+                          <ArrowRightIcon size={15} />
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="actionGroup">
+                      <button type="button" className="btn btnPrimary" onClick={() => setViewMode("cards")}>
+                        <GridIcon size={14} />
+                        <span>Lihat Preview Strip Lengkap ({orderedFrames.length} Panel)</span>
                       </button>
-                    ) : null}
-                  </div>
+                      {onGoToAnimate ? (
+                        <button type="button" className="btn btnOk" onClick={onGoToAnimate}>
+                          <SparklesIcon size={14} />
+                          <span>Lanjut Animasi (Tahap 4)</span>
+                          <ArrowRightIcon size={14} />
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
 
                   <div className="continueSubRow">
+                    <div className="actionGroup">
+                      {segments.length > 1 && activeSegment && activeSegNeed > 0 ? (
+                        <button
+                          type="button"
+                          className="btn btnSm"
+                          disabled={Boolean(busy)}
+                          onClick={() =>
+                            void handleAutoGenerateAllSegments({
+                              onlySingleSegment: true,
+                              targetSegment: activeSegment,
+                              initialDirection: continueNote,
+                            })
+                          }
+                        >
+                          <span>
+                            Auto Segmen {activeSegment.index} Saja ({activeSegNeed})
+                          </span>
+                        </button>
+                      ) : null}
+
+                      {activeSegCompleted && nextSegment ? (
+                        <button
+                          type="button"
+                          className="btn btnSm"
+                          disabled={Boolean(busy)}
+                          onClick={() => void handleContinueNextFrame(nextSegment)}
+                          title={`Langsung susun & gambar panel pertama Segmen ${nextSegment.index}`}
+                        >
+                          <span>+1 Panel (Segmen {nextSegment.index})</span>
+                          <ArrowRightIcon size={13} />
+                        </button>
+                      ) : activeSegmentFrames.length < 7 ? (
+                        <button
+                          type="button"
+                          className="btn btnSm"
+                          disabled={Boolean(busy)}
+                          onClick={() => void handleContinueNextFrame()}
+                          title="Buat & gambar 1 panel berikutnya saja"
+                        >
+                          <span>
+                            +1 Panel Saja (P{activeSegmentFrames.length + 1})
+                          </span>
+                        </button>
+                      ) : null}
+
+                      <button
+                        type="button"
+                        className="btn btnGhost btnSm"
+                        onClick={() => setViewMode("cards")}
+                      >
+                        <GridIcon size={13} />
+                        <span>Preview Strip ({orderedFrames.length})</span>
+                      </button>
+                    </div>
+
                     <label className="checkRow">
                       <input
                         type="checkbox"
@@ -1683,17 +2062,8 @@ export default function StoryboardStep({
                         disabled={Boolean(busy)}
                         onChange={(e) => setAutoGenOnContinue(e.target.checked)}
                       />
-                      <span>Langsung generate gambar otomatis saat klik Continue</span>
+                      <span>Auto-gambar FLUX.2 4B (+1 Panel)</span>
                     </label>
-
-                    <button
-                      type="button"
-                      className="btn btnGhost btnSm"
-                      onClick={() => setViewMode("cards")}
-                    >
-                      <GridIcon size={13} />
-                      <span>Lihat Preview Strip ({orderedFrames.length})</span>
-                    </button>
                   </div>
                 </section>
               </div>
