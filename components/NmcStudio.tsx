@@ -8,7 +8,7 @@ import type {
   StoryboardStep as StepKey,
 } from "@/lib/types";
 import { uid } from "@/lib/presets";
-import { callAi, downloadBlob, loadSettings, projectDb, saveSettings } from "@/lib/storage";
+import { callAi, clipVideoDb, downloadBlob, loadSettings, projectDb, saveSettings } from "@/lib/storage";
 import { cloudDb, mergeProjects } from "@/lib/supabaseSync";
 import { updateProjectMeta } from "@/lib/validator";
 import {
@@ -257,6 +257,7 @@ export default function NmcStudio() {
     }
     await Promise.all([
       projectDb.del(projectId).catch(() => {}),
+      clipVideoDb.delByProject(projectId).catch(() => {}),
       cloudDb.del(projectId).catch(() => {}),
     ]);
     const remaining = projects.filter((p) => p.id !== projectId);

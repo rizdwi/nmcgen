@@ -3,16 +3,31 @@ import { DEFAULT_CLOUDFLARE_ID, defaultProfiles } from "./presets";
 import type { NmcProject, NmcSettings, ProviderProfile } from "./types";
 
 const DB_NAME = "nmcgen-db";
+const DB_VERSION = 2;
 const STORE_NAME = "projects";
+const CLIP_VIDEO_STORE = "clip_videos";
 const SETTINGS_KEY = "nmcgen.settings";
 const KEYS_KEY = "nmcgen.keys";
 
+export interface StoredClipVideo {
+  id: string;
+  projectId: string;
+  clipId: string;
+  blob: Blob;
+  filename: string;
+  source: "flow-upload" | "omni-api";
+  updatedAt: number;
+}
+
 const openDb = () =>
   new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       if (!req.result.objectStoreNames.contains(STORE_NAME)) {
         req.result.createObjectStore(STORE_NAME, { keyPath: "id" });
+      }
+      if (!req.result.objectStoreNames.contains(CLIP_VIDEO_STORE)) {
+        req.result.createObjectStore(CLIP_VIDEO_STORE, { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -22,10 +37,11 @@ const openDb = () =>
 async function runTx<T>(
   mode: IDBTransactionMode,
   fn: (store: IDBObjectStore) => IDBRequest<T>,
+  storeName = STORE_NAME,
 ): Promise<T> {
   const db = await openDb();
   return new Promise<T>((resolve, reject) => {
-    const req = fn(db.transaction(STORE_NAME, mode).objectStore(STORE_NAME));
+    const req = fn(db.transaction(storeName, mode).objectStore(storeName));
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
@@ -36,6 +52,29 @@ export const projectDb = {
   get: (id: string) => runTx<NmcProject | undefined>("readonly", (s) => s.get(id)),
   put: (project: NmcProject) => runTx("readwrite", (s) => s.put(project)),
   del: (id: string) => runTx("readwrite", (s) => s.delete(id)),
+};
+
+export const clipVideoDb = {
+  key: (projectId: string, clipId: string) => `${projectId}:${clipId}`,
+  listByProject: async (projectId: string): Promise<StoredClipVideo[]> => {
+    const all = await runTx<StoredClipVideo[]>("readonly", (s) => s.getAll(), CLIP_VIDEO_STORE);
+    return all.filter((item) => item.projectId === projectId);
+  },
+  get: (projectId: string, clipId: string) =>
+    runTx<StoredClipVideo | undefined>(
+      "readonly",
+      (s) => s.get(`${projectId}:${clipId}`),
+      CLIP_VIDEO_STORE,
+    ),
+  put: (entry: StoredClipVideo) => runTx("readwrite", (s) => s.put(entry), CLIP_VIDEO_STORE),
+  del: (projectId: string, clipId: string) =>
+    runTx("readwrite", (s) => s.delete(`${projectId}:${clipId}`), CLIP_VIDEO_STORE),
+  delByProject: async (projectId: string): Promise<void> => {
+    const items = await clipVideoDb.listByProject(projectId);
+    for (const item of items) {
+      await runTx("readwrite", (s) => s.delete(item.id), CLIP_VIDEO_STORE);
+    }
+  },
 };
 
 export function loadSettings(): NmcSettings {
