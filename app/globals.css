@@ -2777,9 +2777,73 @@ video {
 
 .animateConfigBar {
   display: flex;
+  flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+}
+
+.animateCompactDetails,
+.animateAdvancedDetails {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+
+.animateDetailsSummary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  list-style: none;
+}
+
+.animateDetailsSummary::-webkit-details-marker {
+  display: none;
+}
+
+.animateDetailsSummary::before {
+  content: "+";
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  color: var(--ink-muted);
+  font-size: 13px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+details[open] > .animateDetailsSummary::before {
+  content: "-";
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.animateDetailsSummary > span:first-child {
+  flex: 1 1 200px;
+}
+
+.animateGuideBar {
+  gap: 12px;
+}
+
+.animateGuideBar p {
+  flex: 1 1 260px;
+  line-height: 1.5;
+}
+
+.animateAdvancedBody {
+  margin-top: 12px;
   gap: 12px;
 }
 
@@ -2853,7 +2917,7 @@ video {
 
 .omniClipGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
   gap: 14px;
   align-items: start;
 }
@@ -3145,6 +3209,13 @@ video {
   .assetGrid,
   .omniClipGrid {
     grid-template-columns: 1fr;
+  }
+
+  .animateEngineTab,
+  .omniClipCard .btn,
+  .animateGuideBar .btn,
+  .animateDetailsSummary {
+    min-height: 44px;
   }
 
   .segmentStripSheetWrap {

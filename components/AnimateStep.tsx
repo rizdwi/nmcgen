@@ -37,7 +37,6 @@ import {
   FilmIcon,
   PlayIcon,
   RefreshIcon,
-  SparklesIcon,
   TrashIcon,
   UploadIcon,
 } from "./Icons";
@@ -331,7 +330,7 @@ export default function AnimateStep({
       setCopyFeedback(label);
       setTimeout(() => setCopyFeedback(""), 2200);
     } catch {
-      setGlobalError("Gagal menyalin ke clipboard — salin manual dari kotak teks.");
+      setGlobalError("Gagal menyalin ke clipboard. Salin manual dari kotak teks.");
     }
   };
 
@@ -1145,14 +1144,14 @@ export default function AnimateStep({
       setPendingSegmentId(null);
       setWaitingFlowPlanId(targetPlan.id);
       setGlobalNotice(
-        `${targetPlan.label} siap! Unduh Paket Flow Connector (.zip) untuk render otomatis via Chrome Extension, atau klik "Salin CLI Flow" / "Buka Flow".`,
+        `${targetPlan.label} siap. Klik "Buka Google Flow" untuk mulai membuat video, lalu pasang MP4 hasilnya.`,
       );
       return;
     }
 
     if (!omniKeyAvailable) {
       setGlobalNotice(
-        `Siap menganimasikan "${targetPlan.label}" (Frame Awal → Akhir) ke Gemini Omni 1.2 Flash. Tempel Gemini API Key sekali di bawah — otomatis langsung mulai render tanpa upload manual!`,
+        `Siap menganimasikan "${targetPlan.label}" lewat Gemini API. Tempel Gemini API Key sekali di bawah untuk mulai render otomatis.`,
       );
       return;
     }
@@ -1568,25 +1567,18 @@ export default function AnimateStep({
     <div className="stepContainer">
       <div className="stepIntroRow">
         <div>
-          <span className="stepKicker mono">TAHAP 4 DARI 4 · ANIMASIKAN STORYBOARD</span>
-          <h2 className="stepTitle">Animasi Video (Antigravity / Gemini / Omni 1.2)</h2>
+          <span className="stepKicker mono">TAHAP 4 DARI 4</span>
+          <h2 className="stepTitle">Buat Video</h2>
           <p className="stepSubtitle">
-            Hidupkan seluruh <strong>{orderedFrames.length} panel</strong> ({segments.length} segmen) langsung lewat{" "}
-            <strong>Gemini Omni 1.2 Flash</strong>, kirim 1-klik ke <strong>Antigravity / Gemini / Google Vids</strong>,
-            atau putar <strong>Preview Animatic Instan</strong> langsung di browser.
+            Pilih cara paling nyaman untuk mengubah <strong>{plans.length} klip</strong> ({renderedFrames.length} panel
+            bergambar) menjadi video.
           </p>
         </div>
 
         <div className="actionGroup">
           <button type="button" className="btn btnSm" onClick={onBackToStoryboard}>
-            ← Kembali ke Storyboard
+            Kembali ke Storyboard
           </button>
-          {orderedFrames.length > 0 ? (
-            <button type="button" className="btn btnPrimary btnSm" onClick={handleDownloadOmniPackZip}>
-              <DownloadIcon size={14} />
-              <span>Unduh Paket Flow Connector (.zip)</span>
-            </button>
-          ) : null}
         </div>
       </div>
 
@@ -1619,8 +1611,8 @@ export default function AnimateStep({
 
       {orderedFrames.length === 0 ? (
         <div className="emptyPanel">
-          <h3>Belum ada panel storyboard untuk dianimasikan</h3>
-          <p>Buat minimal 1 panel di Tahap 3 (Storyboard Per-Segmen) terlebih dahulu.</p>
+          <h3>Belum ada panel storyboard untuk dibuat video</h3>
+          <p>Buat minimal 1 panel di Tahap 3 (Storyboard) terlebih dahulu.</p>
           <button type="button" className="btn btnPrimary btnLg" onClick={onBackToStoryboard}>
             Buka Tahap 3: Storyboard
           </button>
@@ -1628,7 +1620,7 @@ export default function AnimateStep({
       ) : (
         <>
           {/* Engine Mode Tabs */}
-          <div className="animateEngineBar" role="tablist" aria-label="Pilih jalur animasi storyboard">
+          <div className="animateEngineBar" role="tablist" aria-label="Pilih cara pembuatan video">
             <button
               type="button"
               role="tab"
@@ -1638,12 +1630,12 @@ export default function AnimateStep({
               onClick={() => selectEngineTab("handoff")}
             >
               <div className="animateEngineTop">
-                <strong>Google Flow + Flow Connector</strong>
+                <strong>Google Flow</strong>
                 <span className="metaTag mono" data-tone={watchFolderName ? "ok" : undefined}>
-                  {watchFolderName ? "Auto-Watch Aktif" : "Otomatis via Ekstensi"}
+                  {watchFolderName ? "Pantau Aktif" : `${readyClips.length}/${plans.length} video`}
                 </span>
               </div>
-              <span>Auto-upload Frame Awal → Akhir via Flow Connector, tangkap MP4 otomatis &amp; gabung jadi 1 film</span>
+              <span>Buat video gratis di flow.google.com, lalu pasang MP4 ke sini.</span>
             </button>
 
             <button
@@ -1655,12 +1647,12 @@ export default function AnimateStep({
               onClick={() => selectEngineTab("omni-api")}
             >
               <div className="animateEngineTop">
-                <strong>Gemini Omni 1.2 Flash (API)</strong>
+                <strong>Render Langsung (API)</strong>
                 <span className="metaTag mono" data-tone={omniKeyAvailable ? "ok" : undefined}>
-                  {omniKeyAvailable ? "Siap" : "Butuh Billing Key"}
+                  {omniKeyAvailable ? "Siap" : "Butuh API Key"}
                 </span>
               </div>
-              <span>Render langsung MP4 + suara dari Frame Awal → Akhir (3–10 dtk, edit multi-turn)</span>
+              <span>Render video + suara otomatis langsung di halaman ini.</span>
             </button>
 
             <button
@@ -1672,84 +1664,153 @@ export default function AnimateStep({
               onClick={() => selectEngineTab("animatic")}
             >
               <div className="animateEngineTop">
-                <strong>Preview Animatic Instan</strong>
-                <span className="metaTag mono">Gratis · Browser</span>
+                <strong>Preview di Browser</strong>
+                <span className="metaTag mono">Gratis · 1 Klik</span>
               </div>
-              <span>Putar animasi kamera Ken Burns + subtitle &amp; ekspor WebM langsung tanpa kuota AI</span>
+              <span>Putar dan unduh animatic langsung tanpa akun tambahan.</span>
             </button>
           </div>
 
-          {/* Shared Strategy Controls for Handoff & Omni 1.2 API */}
+          {/* Collapsible Video Settings (hidden by default to reduce clutter) */}
           {engineTab !== "animatic" ? (
-            <section className="toolbarCard animateConfigBar" aria-label="Pengaturan strategi animasi">
-              <div className="animateConfigGroup">
-                <span className="fieldLabel">Strategi Animasi:</span>
-                <div className="segToggle" role="group" aria-label="Strategi klip animasi">
-                  <button
-                    type="button"
-                    className="segBtn"
-                    aria-selected={mode === "segment"}
-                    disabled={queueRunning}
-                    onClick={() => {
-                      setMode("segment");
-                      setDurationSec((d) => clampOmniDuration(d, "segment"));
-                    }}
-                  >
-                    Awal → Akhir Segmen ({segments.length})
-                  </button>
-                  <button
-                    type="button"
-                    className="segBtn"
-                    aria-selected={mode === "transition"}
-                    disabled={queueRunning}
-                    onClick={() => {
-                      setMode("transition");
-                      setDurationSec((d) => clampOmniDuration(d, "transition"));
-                    }}
-                  >
-                    Transisi Panel→Panel (Detail)
-                  </button>
+            <details className="subtleDetails animateCompactDetails">
+              <summary className="animateDetailsSummary">
+                <span>
+                  Pengaturan video ({mode === "segment" ? "Per Segmen" : "Transisi Panel"}, {safeDuration} detik,{" "}
+                  {resolution})
+                </span>
+              </summary>
+              <div className="subtleDetailsBody animateConfigBar">
+                <div className="animateConfigGroup">
+                  <span className="fieldLabel">Pola Klip:</span>
+                  <div className="segToggle" role="group" aria-label="Pola klip video">
+                    <button
+                      type="button"
+                      className="segBtn"
+                      aria-selected={mode === "segment"}
+                      disabled={queueRunning}
+                      onClick={() => {
+                        setMode("segment");
+                        setDurationSec((d) => clampOmniDuration(d, "segment"));
+                      }}
+                    >
+                      Per Segmen ({segments.length})
+                    </button>
+                    <button
+                      type="button"
+                      className="segBtn"
+                      aria-selected={mode === "transition"}
+                      disabled={queueRunning}
+                      onClick={() => {
+                        setMode("transition");
+                        setDurationSec((d) => clampOmniDuration(d, "transition"));
+                      }}
+                    >
+                      Transisi Panel ke Panel
+                    </button>
+                  </div>
+                </div>
+
+                <div className="actionGroup">
+                  <label className="inlineControl">
+                    <span className="fieldLabel">Durasi/Klip:</span>
+                    <select
+                      className="select inputSm"
+                      value={safeDuration}
+                      disabled={queueRunning}
+                      onChange={(e) => setDurationSec(Number(e.target.value))}
+                    >
+                      {(mode === "panel" ? DURATION_OPTIONS_FULL : DURATION_OPTIONS_TRANSITION).map((sec) => (
+                        <option key={sec} value={sec}>
+                          {sec} detik
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="inlineControl">
+                    <span className="fieldLabel">Resolusi:</span>
+                    <select
+                      className="select inputSm"
+                      value={resolution}
+                      disabled={queueRunning}
+                      onChange={(e) => setResolution(e.target.value as OmniResolution)}
+                    >
+                      {OMNI_RESOLUTIONS.map((r) => (
+                        <option key={r.value} value={r.value}>
+                          {r.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              </div>
+            </details>
+          ) : null}
+
+          {/* Shared Combined Movie Player when >= 1 clip video is attached or rendered */}
+          {engineTab !== "animatic" && readyClips.length > 0 ? (
+            <section className="panelCard omniReelCard">
+              <div className="panelHead">
+                <div className="metaInline">
+                  <FilmIcon size={16} />
+                  <h3>
+                    Film Gabungan ({readyClips.length}/{plans.length} Klip Siap)
+                  </h3>
+                </div>
+                <div className="actionGroup">
+                  <span className="metaTag mono">
+                    Klip {Math.min(playlistIdx + 1, readyClips.length)} / {readyClips.length}
+                  </span>
+                  {readyClips.length >= 2 ? (
+                    <button
+                      type="button"
+                      className="btn btnPrimary btnSm"
+                      disabled={mergingClips}
+                      onClick={() => void handleMergeReadyClips()}
+                      title="Gabungkan semua klip siap beserta suaranya jadi 1 berkas video WebM"
+                    >
+                      <DownloadIcon size={13} />
+                      <span>
+                        {mergingClips ? "Menggabungkan..." : `Gabung & Unduh 1 Video (${readyClips.length} Klip)`}
+                      </span>
+                    </button>
+                  ) : null}
                 </div>
               </div>
 
-              <div className="actionGroup">
-                <label className="inlineControl">
-                  <span className="fieldLabel">Durasi/Klip:</span>
-                  <select
-                    className="select inputSm"
-                    value={safeDuration}
-                    disabled={queueRunning}
-                    onChange={(e) => setDurationSec(Number(e.target.value))}
-                  >
-                    {(mode === "panel" ? DURATION_OPTIONS_FULL : DURATION_OPTIONS_TRANSITION).map((sec) => (
-                      <option key={sec} value={sec}>
-                        {sec} detik
-                      </option>
-                    ))}
-                  </select>
-                </label>
+              <div className="omniReelStage">
+                <video
+                  key={readyClips[Math.min(playlistIdx, readyClips.length - 1)]?.state.blobUrl}
+                  src={readyClips[Math.min(playlistIdx, readyClips.length - 1)]?.state.blobUrl}
+                  controls
+                  playsInline
+                  className="omniVideoPlayer"
+                  onEnded={() => {
+                    if (playlistIdx + 1 < readyClips.length) {
+                      setPlaylistIdx(playlistIdx + 1);
+                    }
+                  }}
+                />
+              </div>
 
-                <label className="inlineControl">
-                  <span className="fieldLabel">Resolusi:</span>
-                  <select
-                    className="select inputSm"
-                    value={resolution}
-                    disabled={queueRunning}
-                    onChange={(e) => setResolution(e.target.value as OmniResolution)}
+              <div className="actionGroup">
+                {readyClips.map((item, i) => (
+                  <button
+                    key={item.plan.id}
+                    type="button"
+                    className={i === Math.min(playlistIdx, readyClips.length - 1) ? "btn btnPrimary btnSm" : "btn btnSm"}
+                    onClick={() => setPlaylistIdx(i)}
                   >
-                    {OMNI_RESOLUTIONS.map((r) => (
-                      <option key={r.value} value={r.value}>
-                        {r.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    Klip {i + 1}: {item.plan.label.slice(0, 28)}
+                  </button>
+                ))}
               </div>
             </section>
           ) : null}
 
           {/* =============================================================== */}
-          {/* TAB 1: GOOGLE FLOW + FLOW CONNECTOR AUTOMATION                  */}
+          {/* TAB 1: GOOGLE FLOW (SIMPLE MAIN VIEW + COLLAPSIBLE ADVANCED)    */}
           {/* =============================================================== */}
           {engineTab === "handoff" ? (
             <div className="omniApiWrap">
@@ -1764,13 +1825,12 @@ export default function AnimateStep({
                   }}
                   onDragLeave={() => setDragOverTarget(null)}
                   onDrop={(e) => void handleDropVideoOnPlan(e, waitingFlowPlan)}
-                  aria-label="Tempel video hasil Google Flow"
+                  aria-label="Pasang video hasil Google Flow"
                 >
                   <div>
-                    <strong>Kembali dari Google Flow — Tempel MP4 untuk {waitingFlowPlan.label}</strong>
+                    <strong>Kembali dari Google Flow: Pasang MP4 untuk {waitingFlowPlan.label}</strong>
                     <p className="fieldHint" style={{ margin: "3px 0 0" }}>
-                      Klik tombol di kanan untuk pilih MP4 hasil unduhan Flow (atau seret file / tekan Ctrl+V). Video
-                      otomatis tersimpan lokal &amp; siap digabung jadi 1 film.
+                      Klik tombol di kanan untuk memilih MP4 hasil unduhan (atau seret file / tekan Ctrl+V).
                     </p>
                   </div>
                   <div className="actionGroup">
@@ -1780,7 +1840,7 @@ export default function AnimateStep({
                       onClick={() => triggerSingleVideoPicker(waitingFlowPlan.id)}
                     >
                       <UploadIcon size={14} />
-                      <span>Tempel MP4 {waitingFlowPlan.label.split(":")[0]}</span>
+                      <span>Pasang MP4 {waitingFlowPlan.label.split(":")[0]}</span>
                     </button>
                     <button
                       type="button"
@@ -1793,85 +1853,214 @@ export default function AnimateStep({
                 </section>
               ) : null}
 
-              {/* Combined Sequential Movie Player + 1-Click Merge (shared with Flow uploads!) */}
-              {readyClips.length > 0 ? (
-                <section className="panelCard omniReelCard">
-                  <div className="panelHead">
-                    <div className="metaInline">
-                      <FilmIcon size={16} />
-                      <h3>
-                        Film Gabungan ({readyClips.length}/{plans.length} Klip Terpasang)
-                      </h3>
-                    </div>
-                    <div className="actionGroup">
-                      <span className="metaTag mono">
-                        Klip {Math.min(playlistIdx + 1, readyClips.length)} / {readyClips.length}
-                      </span>
-                      {readyClips.length >= 2 ? (
+              {/* Simple 1-line guide + batch MP4 attach */}
+              <div className="toolbarCard animateGuideBar">
+                <p className="fieldHint" style={{ margin: 0 }}>
+                  <strong>Alur cepat:</strong> Klik <strong>Buka Google Flow</strong> pada klip (prompt tersalin &amp;
+                  frame terunduh), buat videonya di Flow, lalu klik <strong>Pasang MP4</strong> atau seret berkas ke
+                  kartu.
+                </p>
+                <button
+                  type="button"
+                  className="btn btnSm"
+                  onClick={() => batchVideoInputRef.current?.click()}
+                  title="Pilih beberapa berkas MP4 hasil Google Flow sekaligus untuk dipasang berurutan"
+                >
+                  <UploadIcon size={13} />
+                  <span>Unggah Banyak MP4</span>
+                </button>
+              </div>
+
+              {/* Clean Per-Clip Cards (2 primary buttons per card) */}
+              <div className="omniClipGrid">
+                {plans.map((plan, idx) => {
+                  const st = clipStates[plan.id];
+                  const isWaiting = waitingFlowPlanId === plan.id && !st?.blobUrl;
+                  const cliCmd = buildFlowConnectorCliCommand(plan, {
+                    index: idx + 1,
+                    folderSlug: flowFolderSlug,
+                    model: flowModel,
+                    wait: true,
+                  });
+                  const cliCopyKey = `cli-${plan.id}`;
+
+                  return (
+                    <article
+                      key={plan.id}
+                      data-segment-id={plan.segmentId}
+                      data-status={st?.blobUrl ? "ready" : isWaiting ? "processing" : "idle"}
+                      data-drag-over={dragOverTarget === plan.id}
+                      className="panelCard omniClipCard"
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        setDragOverTarget(plan.id);
+                      }}
+                      onDragLeave={() => setDragOverTarget(null)}
+                      onDrop={(e) => void handleDropVideoOnPlan(e, plan)}
+                    >
+                      <div className="omniClipHead">
+                        <div className="metaInline">
+                          <span className="frameIndexPill mono">KLIP {String(idx + 1).padStart(2, "0")}</span>
+                          <strong>{plan.label}</strong>
+                        </div>
+                        <span
+                          className="statusBadge mono"
+                          data-tone={st?.blobUrl ? "ok" : isWaiting ? "warn" : undefined}
+                        >
+                          {st?.blobUrl
+                            ? "Terpasang"
+                            : isWaiting
+                              ? "Menunggu MP4..."
+                              : `${plan.durationSec} dtk`}
+                        </span>
+                      </div>
+
+                      {plan.images.length > 0 ? (
+                        <div className="omniThumbRow">
+                          {plan.images.map((im, i) => (
+                            <div key={`${plan.id}-im-${i}`} className="omniThumbItem" title={im.label}>
+                              <img src={im.dataUrl} alt={im.label} width={78} height={48} />
+                              <span className="mono">
+                                {plan.images.length === 2 ? (i === 0 ? "AWAL" : "AKHIR") : `#${i + 1}`}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="fieldHint" style={{ margin: 0 }}>
+                          Belum ada gambar panel di klip ini. Buat gambar di Tahap 3 terlebih dahulu.
+                        </p>
+                      )}
+
+                      {/* 2 Core Actions Only */}
+                      <div className="actionGroup">
                         <button
                           type="button"
-                          className="btn btnPrimary btnSm"
-                          disabled={mergingClips}
-                          onClick={() => void handleMergeReadyClips()}
-                          title="Gabungkan semua video segmen beserta suaranya jadi 1 berkas video WebM"
+                          className={st?.blobUrl ? "btn btnSm" : "btn btnPrimary btnSm"}
+                          onClick={() => void handleLaunchFlowForClip(plan)}
+                          title="Salin prompt, unduh Frame Awal & Akhir, lalu buka Google Flow"
                         >
-                          <DownloadIcon size={13} />
-                          <span>
-                            {mergingClips ? "Menggabungkan..." : `Gabung & Unduh 1 Video (${readyClips.length} Klip)`}
-                          </span>
+                          <ExternalLinkIcon size={13} />
+                          <span>Buka Google Flow</span>
                         </button>
+
+                        <button
+                          type="button"
+                          className={isWaiting ? "btn btnOk btnSm" : "btn btnSm"}
+                          onClick={() => triggerSingleVideoPicker(plan.id)}
+                          title="Pilih berkas MP4 hasil unduhan untuk ditempel ke klip ini"
+                        >
+                          <UploadIcon size={13} />
+                          <span>{st?.blobUrl ? "Ganti MP4" : "Pasang MP4"}</span>
+                        </button>
+                      </div>
+
+                      {/* Embedded Video Player when MP4 is attached */}
+                      {st?.blobUrl ? (
+                        <div className="omniClipVideoBox">
+                          <video src={st.blobUrl} controls playsInline className="omniVideoPlayer" />
+                          <div className="actionGroup" style={{ justifyContent: "space-between" }}>
+                            <span className="fieldHint mono">
+                              {st.filename || `${plan.id}.mp4`} · Tersimpan lokal
+                            </span>
+                            <div className="actionGroup">
+                              <button
+                                type="button"
+                                className="btn btnSm"
+                                onClick={() => {
+                                  if (!st.blob) return;
+                                  const slug =
+                                    project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
+                                    "nmcgen";
+                                  downloadBlob(st.blob, `${slug}-klip-${String(idx + 1).padStart(2, "0")}.mp4`);
+                                }}
+                              >
+                                <DownloadIcon size={13} />
+                                <span>Unduh</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btnGhost btnSm"
+                                aria-label={`Lepas video ${plan.label}`}
+                                onClick={() => void handleRemoveClipVideo(plan)}
+                                title="Lepas video dari klip ini"
+                              >
+                                <TrashIcon size={13} />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
                       ) : null}
-                    </div>
-                  </div>
 
-                  <div className="omniReelStage">
-                    <video
-                      key={readyClips[Math.min(playlistIdx, readyClips.length - 1)]?.state.blobUrl}
-                      src={readyClips[Math.min(playlistIdx, readyClips.length - 1)]?.state.blobUrl}
-                      controls
-                      playsInline
-                      className="omniVideoPlayer"
-                      onEnded={() => {
-                        if (playlistIdx + 1 < readyClips.length) {
-                          setPlaylistIdx(playlistIdx + 1);
-                        }
-                      }}
-                    />
-                  </div>
+                      {/* Collapsible Secondary Tools per Clip */}
+                      <details className="subtleDetails">
+                        <summary>Lainnya (Prompt, Frame, CLI)</summary>
+                        <div className="subtleDetailsBody">
+                          <div className="actionGroup">
+                            {plan.images.length > 0 ? (
+                              <button
+                                type="button"
+                                className="btn btnSm"
+                                onClick={() => void handleSaveFramesForPlan(plan)}
+                              >
+                                <DownloadIcon size={13} />
+                                <span>Unduh Frame</span>
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="btn btnSm"
+                              onClick={() => void handleCopyText(plan.prompt, plan.id)}
+                            >
+                              {copyFeedback === plan.id ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+                              <span>{copyFeedback === plan.id ? "Tersalin" : "Salin Prompt"}</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btnGhost btnSm"
+                              onClick={() => void handleCopyText(cliCmd, cliCopyKey)}
+                              title={`Salin perintah Flow Connector CLI untuk Klip ${idx + 1}`}
+                            >
+                              {copyFeedback === cliCopyKey ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+                              <span>{copyFeedback === cliCopyKey ? "CLI Tersalin" : "Salin CLI Flow"}</span>
+                            </button>
+                          </div>
 
-                  <div className="actionGroup">
-                    {readyClips.map((item, i) => (
-                      <button
-                        key={item.plan.id}
-                        type="button"
-                        className={i === Math.min(playlistIdx, readyClips.length - 1) ? "btn btnPrimary btnSm" : "btn btnSm"}
-                        onClick={() => setPlaylistIdx(i)}
-                      >
-                        Klip {i + 1}: {item.plan.label.slice(0, 28)}
-                      </button>
-                    ))}
-                  </div>
-                </section>
-              ) : null}
+                          <textarea
+                            aria-label={`Prompt video untuk ${plan.label}`}
+                            className="textarea omniPromptBox"
+                            value={plan.prompt}
+                            onChange={(e) =>
+                              setPromptOverrides((prev) => ({ ...prev, [plan.id]: e.target.value }))
+                            }
+                          />
+                        </div>
+                      </details>
+                    </article>
+                  );
+                })}
+              </div>
 
-              <div className="animateHandoffGrid">
-                {/* Left: Flow Connector Full Automation + Background Downloads Auto-Watcher */}
-                <section className="panelCard">
-                  <div className="panelHead">
-                    <h3>1. Otomatis via Flow Connector</h3>
-                    <span className="metaTag mono">
-                      {readyClips.length}/{plans.length} video terpasang
+              {/* Collapsed Advanced Automation & Power Tools (100% preserved, hidden by default) */}
+              <details className="subtleDetails animateAdvancedDetails">
+                <summary className="animateDetailsSummary">
+                  <span>Opsi Lanjutan: Otomatisasi Flow Connector, Pantau Downloads &amp; Tautan</span>
+                  {watchFolderName ? (
+                    <span className="statusBadge mono" data-tone="ok">
+                      Pantau Aktif: {watchFolderName}
                     </span>
-                  </div>
+                  ) : null}
+                </summary>
 
-                  {/* Flow Connector Chrome Extension + CLI Bridge Card */}
+                <div className="subtleDetailsBody animateAdvancedBody">
+                  {/* Flow Connector Chrome Extension + CLI Automation */}
                   <div className="flowConnectorCard">
                     <div className="panelHead">
                       <div>
-                        <strong>Auto-Upload &amp; Render Google Flow (Chrome Desktop)</strong>
+                        <strong>Otomatisasi via Flow Connector (Chrome/Edge Desktop)</strong>
                         <p className="fieldHint" style={{ margin: "2px 0 0" }}>
-                          Tidak perlu upload gambar &amp; tempel prompt manual — ekstensi <strong>Flow Connector</strong>{" "}
-                          mengirim Frame Awal + Akhir, menekan Generate, dan mengunduh semua MP4 otomatis.
+                          Ekstensi Flow Connector dapat mengirim Frame Awal + Akhir, menekan Generate, dan mengunduh
+                          semua MP4 otomatis di PC/Laptop.
                         </p>
                       </div>
                       <span className="statusBadge mono" data-tone="ok">
@@ -1920,60 +2109,58 @@ export default function AnimateStep({
                         </div>
                       </li>
                       <li>
-                        <strong>Jalankan otomatis semua segmen:</strong> Unduh paket ZIP di bawah → ekstrak → klik 2×{" "}
-                        <code className="mono">run_flow_connector.bat</code> (Windows) /{" "}
-                        <code className="mono">run_flow_connector.command</code> (Mac) atau{" "}
-                        <code className="mono">node run_flow_connector.mjs</code> sambil tab{" "}
-                        <strong>flow.google.com</strong> terbuka &amp; terlihat.
+                        <strong>Jalankan otomatis semua segmen:</strong> Unduh paket ZIP, ekstrak, lalu jalankan{" "}
+                        <code className="mono">run_flow_connector.bat</code> (Windows),{" "}
+                        <code className="mono">run_flow_connector.command</code> (Mac), atau{" "}
+                        <code className="mono">node run_flow_connector.mjs</code> saat tab{" "}
+                        <strong>flow.google.com</strong> terbuka.
                       </li>
                       <li>
-                        <strong>Hasil MP4 otomatis masuk kembali ke nmcGen:</strong> Aktifkan{" "}
-                        <strong>Pantau Downloads</strong> di bawah — skrip menyimpan hasil ke{" "}
-                        <code className="mono">Downloads/{flowFolderSlug}/</code> dan nmcGen otomatis menempelkannya ke
-                        Klip 01..{String(plans.length).padStart(2, "0")}.
+                        <strong>Pasang MP4 otomatis:</strong> Aktifkan Pantau Downloads di bawah. Skrip menyimpan hasil
+                        ke <code className="mono">Downloads/{flowFolderSlug}/</code> dan nmcGen otomatis memasangnya ke
+                        Klip 01 sampai {String(plans.length).padStart(2, "0")}.
                       </li>
                     </ol>
 
                     <div className="actionGroup">
-                      <button type="button" className="btn btnPrimary" onClick={handleDownloadOmniPackZip}>
-                        <DownloadIcon size={14} />
+                      <button type="button" className="btn btnPrimary btnSm" onClick={handleDownloadOmniPackZip}>
+                        <DownloadIcon size={13} />
                         <span>Unduh Paket Flow Connector (.zip)</span>
                       </button>
                       <button
                         type="button"
-                        className="btn"
+                        className="btn btnSm"
                         onClick={() => void handleCopyText(flowConnectorAgentPrompt, "flow-agent")}
-                        title="Tempel ke Antigravity Desktop / Claude Code / Cursor yang terhubung MCP flow-auto-mcp"
+                        title="Tempel ke Antigravity Desktop, Claude Code, atau Cursor yang terhubung MCP flow-auto-mcp"
                       >
-                        {copyFeedback === "flow-agent" ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
-                        <span>
-                          {copyFeedback === "flow-agent" ? "Tersalin!" : "Salin Prompt Agent Flow"}
-                        </span>
+                        {copyFeedback === "flow-agent" ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+                        <span>{copyFeedback === "flow-agent" ? "Tersalin" : "Salin Prompt Agent"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btnGhost btnSm"
+                        onClick={() => void handleCopyText(masterHandoffPrompt, "master")}
+                      >
+                        {copyFeedback === "master" ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+                        <span>{copyFeedback === "master" ? "Tersalin" : "Salin Prompt Master"}</span>
                       </button>
                     </div>
-
-                    <p className="fieldHint" style={{ margin: 0 }}>
-                      Catatan: Ekstensi Chrome hanya berjalan di <strong>Laptop/PC (Chrome/Edge Desktop)</strong> — iPhone
-                      tidak bisa memasang ekstensi Chrome. Pastikan memasang ekstensi{" "}
-                      <strong>Flow Connector — connect your coding agent to Google Flow image &amp; video</strong> dari
-                      tautan di atas.
-                    </p>
                   </div>
 
-                  {/* Desktop Background Downloads Auto-Watcher (Official File System Access API) */}
+                  {/* Background Downloads Auto-Watcher */}
                   <div className="flowWatchBox" data-active={Boolean(watchFolderName)}>
                     <div style={{ flex: "1 1 220px" }}>
                       <strong>
                         {watchFolderName
                           ? `Pantau Otomatis Aktif: "${watchFolderName}" (+ ${flowFolderSlug})`
-                          : "Auto-Tempel MP4 dari Downloads (Chrome/Edge Desktop)"}
+                          : "Pantau Folder Downloads Otomatis (Chrome/Edge Desktop)"}
                       </strong>
                       <p className="fieldHint" style={{ margin: "3px 0 0" }}>
                         {watchFolderName
-                          ? `Memantau "${watchFolderName}/" & "${watchFolderName}/${flowFolderSlug}/" tiap 2,5 detik. MP4 bernomor 1..${plans.length} otomatis menempel ke segmen tepat!`
+                          ? `Memantau "${watchFolderName}/" dan "${watchFolderName}/${flowFolderSlug}/" tiap 2,5 detik. MP4 bernomor 1 sampai ${plans.length} otomatis terpasang.`
                           : folderWatchSupported
-                            ? `Pilih folder Downloads sekali saja — saat Flow Connector mengunduh MP4 ke Downloads/${flowFolderSlug}/, nmcGen otomatis menangkap & menempelkannya ke segmen sesuai nomor.`
-                            : "Di browser HP (iPhone/Safari), folder otomatis dibatasi OS. Gunakan 'Simpan Frame' → buka Google Flow → lalu 'Tempel MP4' atau 'Unggah Banyak MP4 Sekaligus'."}
+                            ? `Pilih folder Downloads sekali saja agar setiap MP4 baru di Downloads/${flowFolderSlug}/ langsung terpasang otomatis.`
+                            : "Browser HP tidak mendukung pantau folder otomatis. Gunakan tombol Pasang MP4 atau Unggah Banyak MP4."}
                       </p>
                     </div>
                     <div className="actionGroup">
@@ -2001,45 +2188,15 @@ export default function AnimateStep({
                           className="btn btnOk btnSm"
                           onClick={() => void handleEnableFolderWatch()}
                         >
-                          <SparklesIcon size={13} />
+                          <RefreshIcon size={13} />
                           <span>Aktifkan Pantau Downloads</span>
                         </button>
                       ) : null}
                     </div>
                   </div>
 
-                  <div className="actionGroup">
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => batchVideoInputRef.current?.click()}
-                      title="Pilih beberapa berkas MP4 hasil Google Flow sekaligus untuk dipasang otomatis berurutan ke Segmen 1..N"
-                    >
-                      <UploadIcon size={14} />
-                      <span>Unggah Banyak MP4 Sekaligus</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btnGhost"
-                      onClick={() => void handleCopyText(masterHandoffPrompt, "master")}
-                    >
-                      {copyFeedback === "master" ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
-                      <span>
-                        {copyFeedback === "master" ? "Tersalin!" : "Prompt Master"}
-                      </span>
-                    </button>
-                  </div>
-
+                  {/* External App Links */}
                   <div className="handoffAppRow">
-                    <a
-                      href={ANIMATION_APP_LINKS.flowConnectorExtension}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="btn btnSm"
-                    >
-                      <ExternalLinkIcon size={13} />
-                      <span>Pasang Flow Connector</span>
-                    </a>
                     <a
                       href={ANIMATION_APP_LINKS.googleFlow}
                       target="_blank"
@@ -2067,205 +2224,32 @@ export default function AnimateStep({
                       <ExternalLinkIcon size={13} />
                       <span>Gemini App</span>
                     </a>
+                    <a
+                      href={ANIMATION_APP_LINKS.flowConnectorExtension}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="btn btnSm"
+                    >
+                      <ExternalLinkIcon size={13} />
+                      <span>Ekstensi Flow Connector</span>
+                    </a>
                   </div>
 
                   <details className="subtleDetails">
-                    <summary>Pratinjau Prompt Agent Flow Connector ({plans.length} Klip)</summary>
+                    <summary>Pratinjau Prompt Agent Flow ({plans.length} Klip)</summary>
                     <div className="subtleDetailsBody">
                       <pre className="scriptPeekPre">{flowConnectorAgentPrompt}</pre>
                     </div>
                   </details>
 
                   <details className="subtleDetails">
-                    <summary>Pratinjau Prompt Master Antigravity / Gemini</summary>
+                    <summary>Pratinjau Prompt Master</summary>
                     <div className="subtleDetailsBody">
                       <pre className="scriptPeekPre">{masterHandoffPrompt}</pre>
                     </div>
                   </details>
-                </section>
-
-                {/* Right: Per-Segment Google Flow Express Cards (CLI Copy + Manual Launch + Attach MP4) */}
-                <section className="panelCard">
-                  <div className="panelHead">
-                    <h3>2. Jalur Per-Segmen (Frame Awal → Akhir)</h3>
-                    <span className="fieldHint">Auto-Watch / Salin CLI Flow / Tempel MP4</span>
-                  </div>
-
-                  <div className="omniClipList">
-                    {plans.map((plan, idx) => {
-                      const st = clipStates[plan.id];
-                      const isWaiting = waitingFlowPlanId === plan.id && !st?.blobUrl;
-                      const cliCmd = buildFlowConnectorCliCommand(plan, {
-                        index: idx + 1,
-                        folderSlug: flowFolderSlug,
-                        model: flowModel,
-                        wait: true,
-                      });
-                      const cliCopyKey = `cli-${plan.id}`;
-
-                      return (
-                        <article
-                          key={plan.id}
-                          data-segment-id={plan.segmentId}
-                          data-status={st?.blobUrl ? "ready" : isWaiting ? "processing" : "idle"}
-                          data-drag-over={dragOverTarget === plan.id}
-                          className="omniClipCard"
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            setDragOverTarget(plan.id);
-                          }}
-                          onDragLeave={() => setDragOverTarget(null)}
-                          onDrop={(e) => void handleDropVideoOnPlan(e, plan)}
-                        >
-                          <div className="omniClipHead">
-                            <div className="metaInline">
-                              <span className="frameIndexPill mono">KLIP {String(idx + 1).padStart(2, "0")}</span>
-                              <strong>{plan.label}</strong>
-                            </div>
-                            <span
-                              className="statusBadge mono"
-                              data-tone={st?.blobUrl ? "ok" : isWaiting ? "warn" : undefined}
-                            >
-                              {st?.blobUrl
-                                ? "Video Terpasang ✓"
-                                : isWaiting
-                                  ? "Menunggu Hasil Flow..."
-                                  : `${plan.durationSec} dtk · ${plan.summary}`}
-                            </span>
-                          </div>
-
-                          {plan.images.length > 0 ? (
-                            <div className="omniThumbRow">
-                              {plan.images.map((im, i) => (
-                                <div key={`${plan.id}-im-${i}`} className="omniThumbItem" title={im.label}>
-                                  <img src={im.dataUrl} alt={im.label} />
-                                  <span className="mono">
-                                    {plan.images.length === 2 ? (i === 0 ? "AWAL" : "AKHIR") : `#${i + 1}`}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="fieldHint">Belum ada gambar panel tergenerate di klip ini.</p>
-                          )}
-
-                          {/* Flow Connector CLI + Manual Flow + Direct Attach MP4 Controls */}
-                          <div className="actionGroup">
-                            <button
-                              type="button"
-                              className={st?.blobUrl ? "btn btnSm" : "btn btnPrimary btnSm"}
-                              onClick={() => void handleCopyText(cliCmd, cliCopyKey)}
-                              title={`Salin perintah flow-auto untuk Klip ${idx + 1} (jalankan di dalam folder ekstrak ZIP)`}
-                            >
-                              {copyFeedback === cliCopyKey ? <CheckIcon size={13} /> : <SparklesIcon size={13} />}
-                              <span>{copyFeedback === cliCopyKey ? "CLI Tersalin!" : "Salin CLI Flow"}</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              className={isWaiting ? "btn btnOk btnSm" : "btn btnSm"}
-                              onClick={() => triggerSingleVideoPicker(plan.id)}
-                              title="Pilih berkas MP4 hasil unduhan Google Flow untuk ditempel ke segmen ini"
-                            >
-                              <UploadIcon size={13} />
-                              <span>{st?.blobUrl ? "Ganti MP4" : "Tempel MP4"}</span>
-                            </button>
-
-                            {plan.images.length > 0 ? (
-                              <button
-                                type="button"
-                                className="btn btnGhost btnSm"
-                                onClick={() => void handleSaveFramesForPlan(plan)}
-                                title="Simpan Frame Awal & Akhir ke Galeri/Downloads"
-                              >
-                                <DownloadIcon size={13} />
-                                <span>Frame</span>
-                              </button>
-                            ) : null}
-
-                            <button
-                              type="button"
-                              className="btn btnGhost btnSm"
-                              onClick={() => void handleLaunchFlowForClip(plan)}
-                              title="Buka Google Flow manual + salin prompt + unduh Frame Awal & Akhir"
-                            >
-                              <ExternalLinkIcon size={13} />
-                              <span>Buka Flow</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              className="btn btnGhost btnSm"
-                              onClick={() => void handleCopyText(plan.prompt, plan.id)}
-                            >
-                              {copyFeedback === plan.id ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
-                              <span>{copyFeedback === plan.id ? "Tersalin" : "Prompt"}</span>
-                            </button>
-                          </div>
-
-                          {/* Embedded Video Player when Flow/Omni MP4 is attached */}
-                          {st?.blobUrl ? (
-                            <div className="omniClipVideoBox">
-                              <video src={st.blobUrl} controls playsInline className="omniVideoPlayer" />
-                              <div className="actionGroup" style={{ justifyContent: "space-between" }}>
-                                <span className="fieldHint mono">
-                                  {st.filename || `${plan.id}.mp4`} · Tersimpan lokal
-                                </span>
-                                <div className="actionGroup">
-                                  <button
-                                    type="button"
-                                    className="btn btnSm"
-                                    onClick={() => {
-                                      if (!st.blob) return;
-                                      const slug =
-                                        project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
-                                        "nmcgen";
-                                      downloadBlob(st.blob, `${slug}-klip-${String(idx + 1).padStart(2, "0")}.mp4`);
-                                    }}
-                                  >
-                                    <DownloadIcon size={13} />
-                                    <span>Unduh</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn btnGhost btnSm"
-                                    onClick={() => void handleRemoveClipVideo(plan)}
-                                    title="Lepas video dari segmen ini"
-                                  >
-                                    <TrashIcon size={13} />
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="flowDropHint">
-                              <span>
-                                {watchFolderName
-                                  ? `Auto-Watch aktif: MP4 di Downloads/${flowFolderSlug}/${idx + 1} - *.mp4 otomatis menempel ke sini.`
-                                  : `Jalankan run_flow_connector.mjs / seret MP4 ke kartu ini / tekan Ctrl+V.`}
-                              </span>
-                            </div>
-                          )}
-
-                          <details className="subtleDetails">
-                            <summary>Lihat / Edit Prompt Omni 1.2</summary>
-                            <div className="subtleDetailsBody">
-                              <textarea
-                                aria-label={`Prompt Omni 1.2 untuk ${plan.label}`}
-                                className="textarea omniPromptBox"
-                                value={plan.prompt}
-                                onChange={(e) =>
-                                  setPromptOverrides((prev) => ({ ...prev, [plan.id]: e.target.value }))
-                                }
-                              />
-                            </div>
-                          </details>
-                        </article>
-                      );
-                    })}
-                  </div>
-                </section>
-              </div>
+                </div>
+              </details>
             </div>
           ) : null}
 
@@ -2274,173 +2258,144 @@ export default function AnimateStep({
           {/* =============================================================== */}
           {engineTab === "omni-api" ? (
             <div className="omniApiWrap">
-              {/* Gemini API Key Connection Card */}
+              {/* Compact Gemini API Key + Primary Action Card */}
               <section className="panelCard omniKeyCard">
                 <div className="panelHead">
                   <div className="metaInline">
-                    <h3>Koneksi Gemini Omni 1.2 Flash ({OMNI_MODEL_ID})</h3>
+                    <h3>{omniKeyAvailable ? "Render Langsung (Gemini API)" : "Hubungkan Gemini API Key"}</h3>
                     <span className="statusBadge" data-tone={omniKeyAvailable ? "ok" : "warn"}>
                       {omniKeyAvailable ? (
                         <>
                           <CheckIcon size={12} />
                           <span>
-                            {localGeminiKey
-                              ? `API Key Lokal (${geminiKeyHint})`
-                              : "API Key Server Aktif"}
+                            {localGeminiKey ? `Key Lokal (${geminiKeyHint})` : "Key Server Aktif"}
                           </span>
                         </>
                       ) : (
-                        <span>Belum Ada Gemini API Key</span>
+                        <span>Belum Ada API Key</span>
                       )}
                     </span>
                   </div>
 
                   <div className="actionGroup">
-                    {recoverableClips.length > 0 ? (
+                    {omniKeyAvailable && recoverableClips.length > 0 ? (
                       <button
                         type="button"
                         className="btn btnOk btnSm"
-                        disabled={!omniKeyAvailable || queueRunning}
+                        disabled={queueRunning}
                         onClick={() => void handleRecoverAllSavedClips()}
                         title="Muat ulang klip yang pernah dirender tanpa biaya render ulang"
                       >
                         <RefreshIcon size={13} />
-                        <span>Muat Ulang Video Tersimpan ({recoverableClips.length})</span>
+                        <span>Muat Ulang Tersimpan ({recoverableClips.length})</span>
                       </button>
                     ) : null}
-                    <a
-                      href={ANIMATION_APP_LINKS.aiStudio}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="btn btnGhost btnSm"
-                    >
-                      <ExternalLinkIcon size={13} />
-                      <span>Ambil Key di AI Studio</span>
-                    </a>
-                    {localGeminiKey ? (
-                      <button type="button" className="btn btnGhost btnSm" onClick={handleClearGeminiKey}>
-                        Hapus Key
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
 
-                <div className="quickReviseRow">
-                  <input
-                    type="password"
-                    aria-label="Gemini API Key untuk Omni 1.2 Flash"
-                    className="input"
-                    value={geminiKeyDraft}
-                    onChange={(e) => setGeminiKeyDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        handleSaveGeminiKey();
-                      }
-                    }}
-                    placeholder={
-                      omniKeyAvailable
-                        ? "Tempel Gemini API Key baru jika ingin mengganti..."
-                        : "Tempel Gemini API Key (AIza...) untuk render langsung via Gemini Omni 1.2 Flash..."
-                    }
-                  />
-                  <button
-                    type="button"
-                    className="btn"
-                    disabled={!geminiKeyDraft.trim()}
-                    onClick={handleSaveGeminiKey}
-                  >
-                    Simpan Key
-                  </button>
-                  {queueRunning ? (
-                    <button type="button" className="btn btnDanger" onClick={handleCancelQueue}>
-                      Hentikan Antrean
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn btnPrimary"
-                      disabled={!omniKeyAvailable || plans.length === 0}
-                      onClick={() => void handleAnimateAll()}
-                    >
-                      <SparklesIcon size={14} />
-                      <span>Animasikan Semua ({plans.length} Klip)</span>
-                    </button>
-                  )}
-                </div>
-
-                <p className="fieldHint">
-                  Mengirim Frame Awal &amp; Akhir langsung ke endpoint resmi{" "}
-                  <code className="mono">/v1beta/interactions</code> ({OMNI_MODEL_ID}) —{" "}
-                  <strong>tidak perlu upload manual lagi ke Google Flow</strong>. Estimasi biaya Google AI Studio
-                  ~$0.07/detik (720p) sudah termasuk audio &amp; lip-sync.{" "}
-                  <strong>Kunci free tier (tanpa billing aktif di proyek Google) akan ditolak Google saat generate</strong>{" "}
-                  — untuk opsi tanpa API key berbayar, gunakan tab <strong>Antigravity / Gemini / Omni Web</strong>.
-                </p>
-              </section>
-
-              {/* Combined Sequential Reel Player when >= 1 clip is ready */}
-              {readyClips.length > 0 ? (
-                <section className="panelCard omniReelCard">
-                  <div className="panelHead">
-                    <div className="metaInline">
-                      <FilmIcon size={16} />
-                      <h3>
-                        Putar Gabungan Hasil Animasi ({readyClips.length}/{plans.length} Klip Siap)
-                      </h3>
-                    </div>
-                    <div className="actionGroup">
-                      <span className="metaTag mono">
-                        Klip {Math.min(playlistIdx + 1, readyClips.length)} / {readyClips.length}
-                      </span>
-                      {readyClips.length >= 2 ? (
+                    {omniKeyAvailable ? (
+                      queueRunning ? (
+                        <button type="button" className="btn btnDanger btnSm" onClick={handleCancelQueue}>
+                          Hentikan Antrean
+                        </button>
+                      ) : (
                         <button
                           type="button"
                           className="btn btnPrimary btnSm"
-                          disabled={mergingClips}
-                          onClick={() => void handleMergeReadyClips()}
-                          title="Gabungkan semua klip siap beserta suaranya jadi 1 berkas video WebM"
+                          disabled={plans.length === 0}
+                          onClick={() => void handleAnimateAll()}
                         >
-                          <DownloadIcon size={13} />
-                          <span>
-                            {mergingClips ? "Menggabungkan..." : `Gabung & Unduh 1 Video (${readyClips.length} Klip)`}
-                          </span>
+                          <PlayIcon size={13} />
+                          <span>Render Semua Klip ({plans.length})</span>
                         </button>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div className="omniReelStage">
-                    <video
-                      key={readyClips[Math.min(playlistIdx, readyClips.length - 1)]?.state.blobUrl}
-                      src={readyClips[Math.min(playlistIdx, readyClips.length - 1)]?.state.blobUrl}
-                      controls
-                      playsInline
-                      className="omniVideoPlayer"
-                      onEnded={() => {
-                        if (playlistIdx + 1 < readyClips.length) {
-                          setPlaylistIdx(playlistIdx + 1);
-                        }
-                      }}
-                    />
-                  </div>
-
-                  <div className="actionGroup">
-                    {readyClips.map((item, i) => (
-                      <button
-                        key={item.plan.id}
-                        type="button"
-                        className={i === Math.min(playlistIdx, readyClips.length - 1) ? "btn btnPrimary btnSm" : "btn btnSm"}
-                        onClick={() => setPlaylistIdx(i)}
+                      )
+                    ) : (
+                      <a
+                        href={ANIMATION_APP_LINKS.aiStudio}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn btnSm"
                       >
-                        Klip {i + 1}: {item.plan.label.slice(0, 28)}
-                      </button>
-                    ))}
+                        <ExternalLinkIcon size={13} />
+                        <span>Ambil Key di AI Studio</span>
+                      </a>
+                    )}
                   </div>
-                </section>
-              ) : null}
+                </div>
 
-              {/* Per-Clip Omni 1.2 Queue Cards */}
+                {omniKeyAvailable ? (
+                  <details className="subtleDetails">
+                    <summary>Kelola API Key &amp; Info Biaya</summary>
+                    <div className="subtleDetailsBody">
+                      <div className="quickReviseRow">
+                        <input
+                          type="password"
+                          aria-label="Gemini API Key untuk Omni 1.2 Flash"
+                          className="input"
+                          value={geminiKeyDraft}
+                          onChange={(e) => setGeminiKeyDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              handleSaveGeminiKey();
+                            }
+                          }}
+                          placeholder="Tempel Gemini API Key baru untuk mengganti..."
+                        />
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={!geminiKeyDraft.trim()}
+                          onClick={handleSaveGeminiKey}
+                        >
+                          Simpan Key
+                        </button>
+                        {localGeminiKey ? (
+                          <button type="button" className="btn btnGhost" onClick={handleClearGeminiKey}>
+                            Hapus Key
+                          </button>
+                        ) : null}
+                      </div>
+                      <p className="fieldHint" style={{ margin: 0 }}>
+                        Model: <code className="mono">{OMNI_MODEL_ID}</code>. Estimasi biaya Google AI Studio sekitar
+                        $0.07/detik (720p, termasuk audio). Kunci free tier tanpa billing aktif akan ditolak Google;
+                        untuk opsi gratis, gunakan tab Google Flow atau Preview di Browser.
+                      </p>
+                    </div>
+                  </details>
+                ) : (
+                  <>
+                    <div className="quickReviseRow">
+                      <input
+                        type="password"
+                        aria-label="Gemini API Key untuk Omni 1.2 Flash"
+                        className="input"
+                        value={geminiKeyDraft}
+                        onChange={(e) => setGeminiKeyDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            handleSaveGeminiKey();
+                          }
+                        }}
+                        placeholder="Tempel Gemini API Key (AIza...) dengan billing aktif..."
+                      />
+                      <button
+                        type="button"
+                        className="btn btnPrimary"
+                        disabled={!geminiKeyDraft.trim()}
+                        onClick={handleSaveGeminiKey}
+                      >
+                        Simpan Key
+                      </button>
+                    </div>
+                    <p className="fieldHint" style={{ margin: 0 }}>
+                      Memerlukan Gemini API Key dengan billing aktif (~$0.07/detik 720p). Jika belum punya, gunakan
+                      tab <strong>Google Flow</strong> atau <strong>Preview di Browser</strong>.
+                    </p>
+                  </>
+                )}
+              </section>
+
+              {/* Per-Clip API Cards (1-2 core buttons each) */}
               <div className="omniClipGrid">
                 {plans.map((plan, idx) => {
                   const st = clipStates[plan.id] ?? { status: "idle" };
@@ -2465,17 +2420,15 @@ export default function AnimateStep({
                           data-tone={
                             st.status === "ready"
                               ? "ok"
-                              : st.status === "error"
-                                ? undefined
-                                : st.status === "processing"
-                                  ? "warn"
-                                  : undefined
+                              : st.status === "processing"
+                                ? "warn"
+                                : undefined
                           }
                         >
                           {st.status === "ready"
                             ? st.blobUrl
-                              ? "Selesai ✓"
-                              : "Tersimpan di Omni"
+                              ? "Selesai"
+                              : "Tersimpan"
                             : st.status === "processing"
                               ? "Merender..."
                               : st.status === "queued"
@@ -2490,7 +2443,7 @@ export default function AnimateStep({
                         <div className="omniThumbRow">
                           {plan.images.map((im, i) => (
                             <div key={`${plan.id}-t-${i}`} className="omniThumbItem" title={im.label}>
-                              <img src={im.dataUrl} alt={im.label} />
+                              <img src={im.dataUrl} alt={im.label} width={78} height={48} />
                               <span className="mono">
                                 {plan.images.length === 2 ? (i === 0 ? "AWAL" : "AKHIR") : `#${i + 1}`}
                               </span>
@@ -2510,6 +2463,30 @@ export default function AnimateStep({
                           {st.error}
                         </div>
                       ) : null}
+
+                      {/* 1-2 Core Actions Only */}
+                      <div className="actionGroup">
+                        {canRecoverSaved ? (
+                          <button
+                            type="button"
+                            className="btn btnOk btnSm"
+                            disabled={!omniKeyAvailable || isBusyClip}
+                            onClick={() => void handleRecoverSavedClip(plan)}
+                          >
+                            <RefreshIcon size={13} />
+                            <span>Muat Ulang (Gratis)</span>
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className={canRecoverSaved || st.blobUrl ? "btn btnSm" : "btn btnPrimary btnSm"}
+                          disabled={!omniKeyAvailable || isBusyClip}
+                          onClick={() => void runOmniClipJob(plan, "create")}
+                        >
+                          {st.blobUrl || canRecoverSaved ? <RefreshIcon size={13} /> : <PlayIcon size={13} />}
+                          <span>{st.blobUrl || canRecoverSaved ? "Render Ulang" : "Buat Video"}</span>
+                        </button>
+                      </div>
 
                       {st.blobUrl ? (
                         <div className="omniClipVideoBox">
@@ -2566,7 +2543,7 @@ export default function AnimateStep({
                                     void runOmniClipJob(plan, "edit", editText.trim(), st.interactionId);
                                   }
                                 }}
-                                placeholder="Edit klip via chat (mis. buat gerakan lebih halus, pertahankan sisanya)..."
+                                placeholder="Minta revisi video (mis. buat gerakan lebih halus)..."
                               />
                               <button
                                 type="button"
@@ -2584,7 +2561,7 @@ export default function AnimateStep({
                       ) : null}
 
                       <details className="subtleDetails">
-                        <summary>Edit Prompt Omni 1.2 Flash ({plan.summary})</summary>
+                        <summary>Edit Prompt Video</summary>
                         <div className="subtleDetailsBody">
                           <textarea
                             aria-label={`Prompt untuk ${plan.label}`}
@@ -2595,39 +2572,18 @@ export default function AnimateStep({
                               setPromptOverrides((prev) => ({ ...prev, [plan.id]: e.target.value }))
                             }
                           />
+                          <div className="actionGroup">
+                            <button
+                              type="button"
+                              className="btn btnGhost btnSm"
+                              onClick={() => void handleCopyText(plan.prompt, plan.id)}
+                            >
+                              {copyFeedback === plan.id ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+                              <span>{copyFeedback === plan.id ? "Tersalin" : "Salin Prompt"}</span>
+                            </button>
+                          </div>
                         </div>
                       </details>
-
-                      <div className="actionGroup">
-                        {canRecoverSaved ? (
-                          <button
-                            type="button"
-                            className="btn btnOk btnSm"
-                            disabled={!omniKeyAvailable || isBusyClip}
-                            onClick={() => void handleRecoverSavedClip(plan)}
-                          >
-                            <RefreshIcon size={13} />
-                            <span>Muat Ulang Video (Gratis)</span>
-                          </button>
-                        ) : null}
-                        <button
-                          type="button"
-                          className={canRecoverSaved ? "btn btnSm" : "btn btnPrimary btnSm"}
-                          disabled={!omniKeyAvailable || isBusyClip}
-                          onClick={() => void runOmniClipJob(plan, "create")}
-                        >
-                          {st.blobUrl || canRecoverSaved ? <RefreshIcon size={13} /> : <SparklesIcon size={13} />}
-                          <span>{st.blobUrl || canRecoverSaved ? "Render Ulang (Omni 1.2)" : "Animasikan Klip (Omni 1.2)"}</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btnGhost btnSm"
-                          onClick={() => void handleCopyText(plan.prompt, plan.id)}
-                        >
-                          <CopyIcon size={13} />
-                          <span>{copyFeedback === plan.id ? "Tersalin" : "Salin Prompt"}</span>
-                        </button>
-                      </div>
                     </article>
                   );
                 })}
@@ -2642,10 +2598,9 @@ export default function AnimateStep({
             <section className="panelCard animaticCard">
               <div className="panelHead">
                 <div>
-                  <h3>Preview Animatic Instan ({renderedFrames.length} Panel Bergambar)</h3>
+                  <h3>Preview di Browser ({renderedFrames.length} Panel)</h3>
                   <p className="fieldHint">
-                    Cek alur gerak, tempo, musik latar, dan dialog seluruh storyboard langsung di browser (Ken Burns +
-                    crossfade + subtitle) tanpa API key dan tanpa biaya.
+                    Putar animatic dengan gerak kamera dan subtitle, lalu unduh sebagai WebM tanpa akun tambahan.
                   </p>
                 </div>
 
@@ -2671,7 +2626,7 @@ export default function AnimateStep({
                     onClick={() => bgmInputRef.current?.click()}
                   >
                     <UploadIcon size={13} />
-                    <span>{bgmName ? "Ganti BGM" : "+ Musik Latar (MP3/WAV)"}</span>
+                    <span>{bgmName ? "Ganti Musik" : "+ Musik Latar"}</span>
                   </button>
                   <input
                     ref={bgmInputRef}
@@ -2686,7 +2641,7 @@ export default function AnimateStep({
               {bgmName ? (
                 <div className="toolbarCard" style={{ padding: "8px 12px" }}>
                   <div className="metaInline">
-                    <span className="metaTag mono">BGM Aktif</span>
+                    <span className="metaTag mono">Musik Aktif</span>
                     <strong style={{ fontSize: 12.5 }}>{bgmName}</strong>
                   </div>
                   <div className="actionGroup">
@@ -2711,7 +2666,7 @@ export default function AnimateStep({
                       disabled={animPlaying || animRecording}
                       onClick={handleClearBgm}
                     >
-                      Hapus BGM
+                      Hapus Musik
                     </button>
                   </div>
                 </div>
@@ -2719,7 +2674,7 @@ export default function AnimateStep({
 
               {renderedFrames.length === 0 ? (
                 <div className="emptyPanel">
-                  <p>Generate minimal 1 gambar panel di Tahap 3 untuk memutar Animatic Preview.</p>
+                  <p>Buat minimal 1 gambar panel di Tahap 3 untuk memutar preview di browser.</p>
                 </div>
               ) : (
                 <>
@@ -2749,7 +2704,7 @@ export default function AnimateStep({
                         onClick={() => void runAnimaticPlayback(false)}
                       >
                         <PlayIcon size={14} />
-                        <span>Putar Animatic ({(renderedFrames.length * secPerPanel).toFixed(1)} dtk)</span>
+                        <span>Putar Preview ({(renderedFrames.length * secPerPanel).toFixed(1)} dtk)</span>
                       </button>
                     )}
 
@@ -2763,7 +2718,7 @@ export default function AnimateStep({
                       <span>
                         {animRecording
                           ? "Merekam WebM..."
-                          : `Rekam & Unduh Animatic (.webm${bgmName ? " + BGM" : ""})`}
+                          : `Unduh Video (.webm${bgmName ? " + Musik" : ""})`}
                       </span>
                     </button>
                   </div>
