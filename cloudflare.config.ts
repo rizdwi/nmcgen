@@ -15,7 +15,10 @@ export default defineConfig({
       AI: bindings.ai({ dev: { remote: true } }),
       SUPABASE_URL: bindings.secret(),
       SUPABASE_PUBLISHABLE_KEY: bindings.secret(),
-      GEMINI_API_KEY: bindings.secret(),
+      // GEMINI_API_KEY sengaja tidak dideklarasikan sebagai secret wajib:
+      // secret-nya belum ada di Worker sehingga deploy ditolak, dan
+      // getCloudflareEnvVar() sudah mengembalikan "" bila binding tidak ada
+      // (perilaku sama seperti live saat ini; kunci lokal browser tetap jalan).
     },
   }),
 });
