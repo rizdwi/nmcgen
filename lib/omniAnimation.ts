@@ -58,8 +58,8 @@ export interface OmniClipPlan {
 }
 
 export function clampOmniDuration(seconds: number | undefined, mode: OmniAnimationMode | "extend"): number {
-  const maxSec = mode === "transition" || mode === "extend" ? 10 : 15;
-  const fallback = mode === "transition" ? 6 : mode === "segment" ? 12 : 6;
+  const maxSec = mode === "segment" || mode === "transition" || mode === "extend" ? 10 : 15;
+  const fallback = mode === "segment" ? 8 : mode === "transition" ? 6 : 6;
   const v = Math.round(Number(seconds) || fallback);
   return Math.max(3, Math.min(maxSec, v));
 }
@@ -216,40 +216,29 @@ export function buildOmniClipPlans(
       const segFrames = ordered.filter((f) => f.segmentId === seg.id);
       if (segFrames.length === 0) return;
 
-      // Omni 1.2 Flash accepts up to 6 reference images per request.
-      const images: OmniInputImage[] = [];
-      segFrames.forEach((f, idx) => {
-        const img = getSelectedFrameImage(f);
-        if (!img || images.length >= 6) return;
+      // Clean First + Last Frame interpolation per segment:
+      // send ONLY Panel 1 (Frame Awal) and Final Panel (Frame Akhir) for smooth, effortless Omni 1.2 video generation.
+      const drawnFrames = segFrames
+        .map((f, idx) => ({ frame: f, idx, img: getSelectedFrameImage(f) }))
+        .filter((x): x is { frame: StoryFrame; idx: number; img: string } => Boolean(x.img));
+
+      const picked =
+        drawnFrames.length <= 1
+          ? drawnFrames
+          : [drawnFrames[0], drawnFrames[drawnFrames.length - 1]];
+
+      const images: OmniInputImage[] = picked.map(({ frame: f, idx, img }, pos) => {
         const pNum = f.panelNumber ?? idx + 1;
         const dec = parseDataUrlBase64(img);
-        images.push({
-          label: `S${seg.index} · Panel ${pNum}: ${f.title}`,
+        const role = pos === 0 ? "Awal" : "Akhir";
+        return {
+          label: `${role}: Panel ${pNum} (${f.title})`,
           fileName: `keyframes/S${String(seg.index).padStart(2, "0")}_P${String(pNum).padStart(2, "0")}.${dec?.ext || "jpg"}`,
           dataUrl: img,
-        });
+        };
       });
 
-      // If segment has <= 1 panel image and we have approved character reference images, add up to 2 character refs (<= 6 total)
-      if (images.length < 6) {
-        const charIds = new Set(segFrames.flatMap((f) => f.assetIds));
-        const chars = sb.assets.filter((a) => a.category === "character" && charIds.has(a.id));
-        for (const ch of chars) {
-          if (images.length >= 6) break;
-          const img = getSelectedAssetImage(ch);
-          if (!img) continue;
-          const dec = parseDataUrlBase64(img);
-          const slug = ch.name.toLowerCase().replace(/[^a-z0-9]+/g, "_") || "char";
-          images.push({
-            label: `Aset ACC: ${ch.name}`,
-            fileName: `assets/${slug}.${dec?.ext || "jpg"}`,
-            dataUrl: img,
-          });
-        }
-      }
-
-      // First + last frame mode in Omni 1.2 caps at 10s; if exactly 2 images are sent, keep duration <= 10s safely.
-      const safeDuration = images.length === 2 ? Math.min(durationSec, 10) : durationSec;
+      const safeDuration = clampOmniDuration(durationSec, "segment");
       const prompt = buildSegmentTimestampPrompt({
         segment: seg,
         frames: segFrames,
@@ -257,6 +246,12 @@ export function buildOmniClipPlans(
         visualStyle: sb.visualStyle,
         imageCount: images.length,
       });
+
+      const firstPanelNum = picked[0] ? picked[0].frame.panelNumber ?? picked[0].idx + 1 : 1;
+      const lastPanelNum =
+        picked.length >= 2
+          ? picked[1].frame.panelNumber ?? picked[1].idx + 1
+          : firstPanelNum;
 
       plans.push({
         id: `seg-${seg.id}`,
@@ -270,7 +265,12 @@ export function buildOmniClipPlans(
         aspectRatio: sb.aspectRatio,
         images,
         prompt,
-        summary: `${segFrames.length} panel berurutan · ${images.length} gambar acuan`,
+        summary:
+          images.length >= 2
+            ? `Frame Awal (P${firstPanelNum}) → Frame Akhir (P${lastPanelNum})`
+            : images.length === 1
+              ? `Frame Awal (P${firstPanelNum})`
+              : `${segFrames.length} panel (belum ada gambar)`,
       });
     });
     return plans;
@@ -635,7 +635,7 @@ export function buildOmniBatchJobsJson(project: NmcProject, plans: OmniClipPlan[
       aspect_ratio: plan.aspectRatio,
       output: `renders/${slug}_clip_${String(idx + 1).padStart(2, "0")}.mp4`,
     };
-    if (plan.mode === "transition" && plan.images.length >= 2) {
+    if ((plan.mode === "segment" || plan.mode === "transition") && plan.images.length >= 2) {
       base.first_frame = plan.images[0].fileName;
       base.last_frame = plan.images[1].fileName;
     } else if (plan.images.length === 1) {

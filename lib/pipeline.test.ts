@@ -688,9 +688,10 @@ assert.ok(segMd.includes("### Segmen 02: Menuju Fajar"));
 
 // 15. Step 4 Animation: Antigravity / Gemini Handoff & Gemini Omni 1.2 Flash Interactions API
 assert.equal(OMNI_MODEL_ID, "gemini-omni-1.2-flash");
-assert.equal(clampOmniDuration(20, "segment"), 15);
+assert.equal(clampOmniDuration(20, "segment"), 10, "Segment First+Last frame interpolation in Omni 1.2 must cap at 10s");
 assert.equal(clampOmniDuration(15, "transition"), 10, "First+last frame interpolation in Omni 1.2 must cap at 10s");
 assert.equal(clampOmniDuration(14, "extend"), 10, "Video extension in Omni 1.2 must cap at 10s");
+assert.equal(clampOmniDuration(20, "panel"), 15);
 assert.equal(clampOmniDuration(1, "panel"), 3);
 
 // SSRF protection on Google Files API URIs
@@ -701,7 +702,7 @@ assert.equal(
 assert.equal(validateGoogleFileUri("https://evil.example.com/v1beta/files/abc123").ok, false);
 assert.equal(validateGoogleFileUri("http://127.0.0.1:8080/v1beta/files/abc").ok, false);
 
-// Attach mock images to reindexed panels to test all 3 clip planning modes
+// Attach mock images to reindexed panels to test clip planning modes
 const renderedSegmented: NmcProject = {
   ...segmentedProject,
   storyboard: {
@@ -716,9 +717,36 @@ const renderedSegmented: NmcProject = {
 
 const segPlans = buildOmniClipPlans(renderedSegmented, { mode: "segment", durationSec: 12, resolution: "720p" });
 assert.equal(segPlans.length, 2);
-assert.ok(segPlans[0].images.length <= 6, "Omni 1.2 accepts at most 6 reference images");
+assert.equal(segPlans[0].images.length, 2, "Segment mode sends only Start + End frame");
+assert.equal(segPlans[0].durationSec, 10, "Segment First+Last frame must cap at 10s");
 assert.equal(segPlans[0].prompt.includes("<FIRST_FRAME>"), false, "Must never emit deprecated Omni tags");
+assert.ok(segPlans[0].prompt.includes("Use the first image as the starting frame and the second image as the final frame"));
 assert.ok(segPlans[0].prompt.includes("[0-"), "Segment prompt must include timestamped beat pacing");
+
+// 7-panel segment must strictly pick ONLY 2 frames: Panel 1 (start) and Panel 7 (end)
+const sevenPanelFrames = Array.from({ length: 7 }, (_, i) => ({
+  ...renderedSegmented.storyboard!.frames[0],
+  id: `p7-${i + 1}`,
+  segmentId: seg1Target.id,
+  panelNumber: i + 1,
+  index: i + 1,
+  title: `Panel ${i + 1}`,
+}));
+const sevenPanelProject: NmcProject = {
+  ...renderedSegmented,
+  storyboard: {
+    ...renderedSegmented.storyboard!,
+    segments: [{ ...seg1Target, targetPanels: 7 }],
+    frames: sevenPanelFrames,
+  },
+};
+const sevenPlans = buildOmniClipPlans(sevenPanelProject, { mode: "segment", durationSec: 12, resolution: "720p" });
+assert.equal(sevenPlans[0].images.length, 2, "Must only attach Start Frame + End Frame");
+assert.ok(sevenPlans[0].images[0].label.includes("Panel 1"), "Must keep starting Panel 1");
+assert.ok(sevenPlans[0].images[1].label.includes("Panel 7"), "Must keep ending Panel 7");
+const segBatchJobs = JSON.parse(buildOmniBatchJobsJson(sevenPanelProject, sevenPlans)) as Array<Record<string, unknown>>;
+assert.equal(segBatchJobs[0].first_frame, "keyframes/S01_P01.jpg");
+assert.equal(segBatchJobs[0].last_frame, "keyframes/S01_P07.jpg");
 
 const transPlans = buildOmniClipPlans(renderedSegmented, { mode: "transition", durationSec: 15, resolution: "1080p" });
 assert.equal(transPlans[0].durationSec, 10, "Transition mode must clamp duration to 10s max");

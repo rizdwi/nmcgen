@@ -43,6 +43,7 @@ export default function NmcStudio() {
   const [loadError, setLoadError] = useState("");
   const [stepNotice, setStepNotice] = useState("");
   const [globalBusy, setGlobalBusy] = useState("");
+  const [autoAnimateSegmentId, setAutoAnimateSegmentId] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestProjectRef = useRef<NmcProject | null>(null);
 
@@ -649,7 +650,14 @@ export default function NmcStudio() {
             imageProfile={imageProfile}
             onPatchSb={patchStoryboard}
             onSyncDiscoveredModels={handleSyncDiscoveredModels}
-            onGoToAnimate={() => patchStoryboard({ step: "animate" })}
+            onGoToAnimate={() => {
+              setAutoAnimateSegmentId(null);
+              patchStoryboard({ step: "animate" });
+            }}
+            onAnimateSegment={(segmentId) => {
+              setAutoAnimateSegmentId(segmentId);
+              patchStoryboard({ step: "animate" });
+            }}
             onOpenSettings={() => setSettingsOpen(true)}
           />
         ) : null}
@@ -659,8 +667,14 @@ export default function NmcStudio() {
             project={project}
             sb={sb}
             runtime={runtime}
+            profiles={settings.profiles}
+            autoAnimateSegmentId={autoAnimateSegmentId}
+            onConsumeAutoAnimate={() => setAutoAnimateSegmentId(null)}
             onPatchSb={patchStoryboard}
-            onBackToStoryboard={() => patchStoryboard({ step: "storyboard" })}
+            onBackToStoryboard={() => {
+              setAutoAnimateSegmentId(null);
+              patchStoryboard({ step: "storyboard" });
+            }}
           />
         ) : null}
       </main>

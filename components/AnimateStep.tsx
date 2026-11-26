@@ -4,11 +4,13 @@ import type {
   NmcProject,
   OmniAnimationMode,
   OmniResolution,
+  ProviderProfile,
   RuntimeStatus,
   StoryAnimationClip,
   StoryboardData,
 } from "@/lib/types";
 import { DEFAULT_GEMINI_ID } from "@/lib/presets";
+import { compressImageForStorage } from "@/lib/imageUtils";
 import { downloadBlob, getApiKey, getKeyHint, setApiKey } from "@/lib/storage";
 import {
   ANIMATION_APP_LINKS,
@@ -37,6 +39,9 @@ interface AnimateStepProps {
   project: NmcProject;
   sb: StoryboardData;
   runtime: RuntimeStatus | null;
+  profiles?: ProviderProfile[];
+  autoAnimateSegmentId?: string | null;
+  onConsumeAutoAnimate?: () => void;
   onPatchSb: (patch: Partial<StoryboardData>) => void;
   onBackToStoryboard: () => void;
 }
@@ -66,19 +71,33 @@ function base64DataUrlToBlob(dataUrl: string): Blob {
   return new Blob([bytes], { type: mime });
 }
 
+function findSavedGeminiProfileKey(profiles?: ProviderProfile[]): { key: string; hint: string } {
+  const defaultKey = getApiKey(DEFAULT_GEMINI_ID);
+  if (defaultKey) return { key: defaultKey, hint: getKeyHint(DEFAULT_GEMINI_ID) };
+  for (const p of profiles ?? []) {
+    if (p.kind !== "Gemini") continue;
+    const k = getApiKey(p.id);
+    if (k) return { key: k, hint: getKeyHint(p.id) };
+  }
+  return { key: "", hint: "" };
+}
+
 export default function AnimateStep({
   project,
   sb,
   runtime,
+  profiles,
+  autoAnimateSegmentId,
+  onConsumeAutoAnimate,
   onPatchSb,
   onBackToStoryboard,
 }: AnimateStepProps) {
-  const hasSavedGeminiKey = Boolean(getApiKey(DEFAULT_GEMINI_ID) || runtime?.serverKeys?.gemini);
+  const hasSavedGeminiKey = Boolean(findSavedGeminiProfileKey(profiles).key || runtime?.serverKeys?.gemini);
   const [engineTab, setEngineTab] = useState<EngineTab>(() =>
-    hasSavedGeminiKey ? "omni-api" : "handoff",
+    autoAnimateSegmentId || hasSavedGeminiKey ? "omni-api" : "handoff",
   );
   const [mode, setMode] = useState<OmniAnimationMode>("segment");
-  const [durationSec, setDurationSec] = useState<number>(10);
+  const [durationSec, setDurationSec] = useState<number>(8);
   const [resolution, setResolution] = useState<OmniResolution>("720p");
 
   const [geminiKeyDraft, setGeminiKeyDraft] = useState("");
@@ -104,8 +123,13 @@ export default function AnimateStep({
   const [globalError, setGlobalError] = useState("");
   const [globalNotice, setGlobalNotice] = useState("");
   const [playlistIdx, setPlaylistIdx] = useState(0);
+  const [pendingSegmentId, setPendingSegmentId] = useState<string | null>(null);
   const cancelRef = useRef(false);
   const blobUrlsRef = useRef<string[]>([]);
+  const latestSbRef = useRef<StoryboardData>(sb);
+  latestSbRef.current = sb;
+  const clipStatesRef = useRef<Record<string, RuntimeClipState>>(clipStates);
+  clipStatesRef.current = clipStates;
 
   // Browser Animatic state + optional BGM track
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -145,15 +169,13 @@ export default function AnimateStep({
     [project, sb, segments, orderedFrames, plans],
   );
 
-  // Saved Gemini key indicator (re-evaluated when keyVersion bumps)
-  const localGeminiKey = useMemo(() => {
+  // Saved Gemini key indicator (checks DEFAULT_GEMINI_ID + any Gemini profile saved in Settings)
+  const resolvedGemini = useMemo(() => {
     void keyVersion;
-    return getApiKey(DEFAULT_GEMINI_ID);
-  }, [keyVersion]);
-  const geminiKeyHint = useMemo(() => {
-    void keyVersion;
-    return getKeyHint(DEFAULT_GEMINI_ID);
-  }, [keyVersion]);
+    return findSavedGeminiProfileKey(profiles);
+  }, [keyVersion, profiles]);
+  const localGeminiKey = resolvedGemini.key;
+  const geminiKeyHint = resolvedGemini.hint;
   const omniKeyAvailable = Boolean(localGeminiKey || runtime?.serverKeys?.gemini);
 
   // Revoke object URLs on unmount
@@ -166,7 +188,7 @@ export default function AnimateStep({
   }, []);
 
   const persistClipRecord = (plan: OmniClipPlan, state: RuntimeClipState) => {
-    const existing = sb.animationClips ?? [];
+    const existing = latestSbRef.current.animationClips ?? [];
     const nextRecord: StoryAnimationClip = {
       id: plan.id,
       label: plan.label,
@@ -185,6 +207,7 @@ export default function AnimateStep({
     const idx = existing.findIndex((c) => c.id === plan.id);
     const updated =
       idx === -1 ? [...existing, nextRecord] : existing.map((c, i) => (i === idx ? nextRecord : c));
+    latestSbRef.current = { ...latestSbRef.current, animationClips: updated };
     onPatchSb({ animationClips: updated });
   };
 
@@ -285,6 +308,15 @@ export default function AnimateStep({
     });
 
     try {
+      const preparedImages =
+        op === "create"
+          ? await Promise.all(
+              plan.images
+                .slice(0, 6)
+                .map((im) => compressImageForStorage(im.dataUrl, { maxSide: 1024, quality: 0.84 })),
+            )
+          : undefined;
+
       const createRes = await fetch("/api/video/omni", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -292,7 +324,7 @@ export default function AnimateStep({
           op,
           apiKey: localGeminiKey || undefined,
           prompt: customPrompt || plan.prompt,
-          images: op === "create" ? plan.images.map((im) => im.dataUrl) : undefined,
+          images: preparedImages,
           previousInteractionId,
           mode: plan.mode,
           durationSec: op === "extend" ? 5 : plan.durationSec,
@@ -549,6 +581,58 @@ export default function AnimateStep({
       await handleRecoverSavedClip(plan);
     }
   };
+
+  // Capture 1-tap "Animasikan Segmen X (Omni 1.2)" handoff coming from Step 3 Storyboard
+  useEffect(() => {
+    if (!autoAnimateSegmentId) return;
+    setEngineTab("omni-api");
+    setMode("segment");
+    setPendingSegmentId(autoAnimateSegmentId);
+    onConsumeAutoAnimate?.();
+  }, [autoAnimateSegmentId, onConsumeAutoAnimate]);
+
+  // Auto-launch Omni 1.2 Flash immediately for the targeted segment (or right after user saves Gemini key)
+  useEffect(() => {
+    if (!pendingSegmentId || mode !== "segment" || engineTab !== "omni-api") return;
+    const targetPlan = plans.find((p) => p.segmentId === pendingSegmentId);
+    if (!targetPlan) return;
+
+    // Scroll target segment card smoothly into view on mobile & desktop
+    setTimeout(() => {
+      const el = document.querySelector(`[data-segment-id="${pendingSegmentId}"]`);
+      if (el && typeof el.scrollIntoView === "function") {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }, 120);
+
+    if (!omniKeyAvailable) {
+      setGlobalNotice(
+        `Siap menganimasikan "${targetPlan.label}" (Frame Awal → Akhir) ke Gemini Omni 1.2 Flash. Tempel Gemini API Key sekali di bawah — otomatis langsung mulai render tanpa upload manual!`,
+      );
+      return;
+    }
+
+    setPendingSegmentId(null);
+    const curState = clipStatesRef.current[targetPlan.id];
+    if (curState?.status === "processing" || curState?.status === "queued") {
+      return;
+    }
+    if (curState?.blobUrl) {
+      setGlobalNotice(`Video "${targetPlan.label}" sudah siap diputar & diunduh di bawah.`);
+      return;
+    }
+    if (curState?.fileUri || curState?.interactionId) {
+      setGlobalNotice(`Memuat ulang video tersimpan untuk "${targetPlan.label}" (Gratis)...`);
+      void handleRecoverSavedClip(targetPlan);
+      return;
+    }
+
+    setGlobalNotice(
+      `Mengirim langsung Frame Awal → Akhir dari "${targetPlan.label}" ke Gemini Omni 1.2 Flash (tanpa upload manual)...`,
+    );
+    void runOmniClipJob(targetPlan, "create");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingSegmentId, mode, engineTab, omniKeyAvailable, plans]);
 
   const readyClips = useMemo(
     () =>
@@ -1008,7 +1092,7 @@ export default function AnimateStep({
                   {omniKeyAvailable ? "Siap" : "Butuh Gemini Key"}
                 </span>
               </div>
-              <span>Render langsung MP4 + suara (3–15 dtk, interpolasi First→Last, edit multi-turn)</span>
+              <span>Render langsung MP4 + suara dari Frame Awal → Akhir (3–10 dtk, edit multi-turn)</span>
             </button>
 
             <button
@@ -1043,7 +1127,7 @@ export default function AnimateStep({
                       setDurationSec((d) => clampOmniDuration(d, "segment"));
                     }}
                   >
-                    Per Segmen ({segments.length})
+                    Awal → Akhir Segmen ({segments.length})
                   </button>
                   <button
                     type="button"
@@ -1055,19 +1139,7 @@ export default function AnimateStep({
                       setDurationSec((d) => clampOmniDuration(d, "transition"));
                     }}
                   >
-                    Transisi Panel→Panel
-                  </button>
-                  <button
-                    type="button"
-                    className="segBtn"
-                    aria-selected={mode === "panel"}
-                    disabled={queueRunning}
-                    onClick={() => {
-                      setMode("panel");
-                      setDurationSec((d) => clampOmniDuration(d, "panel"));
-                    }}
-                  >
-                    Per Panel ({orderedFrames.length})
+                    Transisi Panel→Panel (Detail)
                   </button>
                 </div>
               </div>
@@ -1081,7 +1153,7 @@ export default function AnimateStep({
                     disabled={queueRunning}
                     onChange={(e) => setDurationSec(Number(e.target.value))}
                   >
-                    {(mode === "transition" ? DURATION_OPTIONS_TRANSITION : DURATION_OPTIONS_FULL).map((sec) => (
+                    {(mode === "panel" ? DURATION_OPTIONS_FULL : DURATION_OPTIONS_TRANSITION).map((sec) => (
                       <option key={sec} value={sec}>
                         {sec} detik
                       </option>
@@ -1217,7 +1289,9 @@ export default function AnimateStep({
                           {plan.images.map((im, i) => (
                             <div key={`${plan.id}-im-${i}`} className="omniThumbItem" title={im.label}>
                               <img src={im.dataUrl} alt={im.label} />
-                              <span className="mono">#{i + 1}</span>
+                              <span className="mono">
+                                {plan.images.length === 2 ? (i === 0 ? "AWAL" : "AKHIR") : `#${i + 1}`}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -1341,10 +1415,12 @@ export default function AnimateStep({
                 </div>
 
                 <p className="fieldHint">
-                  Memakai endpoint resmi <code className="mono">/v1beta/interactions</code> ({OMNI_MODEL_ID}). Estimasi
-                  biaya Google AI Studio ~$0.07/detik (720p) sudah termasuk audio &amp; lip-sync. <strong>Kunci free
-                  tier (tanpa billing aktif di proyek Google) akan ditolak Google saat generate</strong> — untuk opsi
-                  tanpa API key berbayar, gunakan tab <strong>Antigravity / Gemini / Omni Web</strong>.
+                  Mengirim Frame Awal &amp; Akhir langsung ke endpoint resmi{" "}
+                  <code className="mono">/v1beta/interactions</code> ({OMNI_MODEL_ID}) —{" "}
+                  <strong>tidak perlu upload manual lagi ke Google Flow</strong>. Estimasi biaya Google AI Studio
+                  ~$0.07/detik (720p) sudah termasuk audio &amp; lip-sync.{" "}
+                  <strong>Kunci free tier (tanpa billing aktif di proyek Google) akan ditolak Google saat generate</strong>{" "}
+                  — untuk opsi tanpa API key berbayar, gunakan tab <strong>Antigravity / Gemini / Omni Web</strong>.
                 </p>
               </section>
 
@@ -1418,7 +1494,12 @@ export default function AnimateStep({
                   const canRecoverSaved = Boolean((st.fileUri || st.interactionId) && !st.blobUrl);
 
                   return (
-                    <article key={plan.id} className="panelCard omniClipCard" data-status={st.status}>
+                    <article
+                      key={plan.id}
+                      data-segment-id={plan.segmentId}
+                      className="panelCard omniClipCard"
+                      data-status={st.status}
+                    >
                       <div className="omniClipHead">
                         <div className="metaInline">
                           <span className="frameIndexPill mono">KLIP {String(idx + 1).padStart(2, "0")}</span>
@@ -1455,7 +1536,9 @@ export default function AnimateStep({
                           {plan.images.map((im, i) => (
                             <div key={`${plan.id}-t-${i}`} className="omniThumbItem" title={im.label}>
                               <img src={im.dataUrl} alt={im.label} />
-                              <span className="mono">#{i + 1}</span>
+                              <span className="mono">
+                                {plan.images.length === 2 ? (i === 0 ? "AWAL" : "AKHIR") : `#${i + 1}`}
+                              </span>
                             </div>
                           ))}
                         </div>

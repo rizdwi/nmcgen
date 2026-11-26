@@ -65,6 +65,7 @@ interface StoryboardStepProps {
     discovered: { textModels: string[]; imageModels: string[]; fetchedAt: number },
   ) => void;
   onGoToAnimate?: () => void;
+  onAnimateSegment?: (segmentId: string) => void;
   onOpenSettings: () => void;
 }
 
@@ -83,6 +84,7 @@ export default function StoryboardStep({
   onPatchSb,
   onSyncDiscoveredModels,
   onGoToAnimate,
+  onAnimateSegment,
   onOpenSettings,
 }: StoryboardStepProps) {
   const segments = useMemo(() => getStoryboardSegments(sb), [sb]);
@@ -893,6 +895,46 @@ export default function StoryboardStep({
     }
   };
 
+  const handleApproveSegment = (seg: StorySegment) => {
+    const curSb = latestSbRef.current;
+    const segs = getStoryboardSegments(curSb);
+    const ordered = reindexStoryboardFrames(curSb.frames, segs);
+    const segFrames = ordered.filter((f) => f.segmentId === seg.id && Boolean(getSelectedFrameImage(f)));
+    if (segFrames.length === 0) {
+      setError(`Belum ada gambar panel di Segmen ${seg.index} untuk di-ACC.`);
+      return;
+    }
+    const updated = ordered.map((f) =>
+      f.segmentId === seg.id && getSelectedFrameImage(f) ? { ...f, approved: true } : f,
+    );
+    commitFrames(updated, undefined, segs);
+    setError("");
+    setNotice(
+      `Semua ${segFrames.length} panel di Segmen ${seg.index} sudah ACC! Klik "Animasikan Segmen ${seg.index} (Omni 1.2)" untuk langsung render video tanpa upload manual.`,
+    );
+  };
+
+  const handleApproveAndAnimateSegment = (seg: StorySegment) => {
+    const curSb = latestSbRef.current;
+    const segs = getStoryboardSegments(curSb);
+    const ordered = reindexStoryboardFrames(curSb.frames, segs);
+    const segDrawn = ordered.filter((f) => f.segmentId === seg.id && Boolean(getSelectedFrameImage(f)));
+    if (segDrawn.length === 0) {
+      setError(`Generate minimal 1 gambar panel di Segmen ${seg.index} dulu sebelum menganimasikan ke Omni 1.2.`);
+      return;
+    }
+    const updated = ordered.map((f) =>
+      f.segmentId === seg.id && getSelectedFrameImage(f) ? { ...f, approved: true } : f,
+    );
+    commitFrames(updated, undefined, segs);
+    setError("");
+    if (onAnimateSegment) {
+      onAnimateSegment(seg.id);
+    } else if (onGoToAnimate) {
+      onGoToAnimate();
+    }
+  };
+
   const activeImg = activeFrame ? getSelectedFrameImage(activeFrame) : null;
   const activeComposed = useMemo(
     () => (activeFrame ? composeStoryboardFramePrompt(activeFrame, sb, previousFrame) : null),
@@ -904,6 +946,15 @@ export default function StoryboardStep({
   const activeSegUndrawn = activeSegmentFrames.filter((f) => !getSelectedFrameImage(f)).length;
   const activeSegNeed = Math.max(0, activeSegTarget - activeSegmentFrames.length) + activeSegUndrawn;
   const activeSegCompleted = activeSegmentFrames.length >= activeSegTarget && activeSegUndrawn === 0;
+  const activeSegAllApproved =
+    activeSegCompleted && activeSegmentFrames.length > 0 && activeSegmentFrames.every((f) => f.approved);
+  const segmentVideoStatusMap = useMemo(() => {
+    const map = new Map<string, StoryboardData["animationClips"] extends Array<infer T> | undefined ? T : never>();
+    for (const c of sb.animationClips ?? []) {
+      if (c.segmentId && c.mode === "segment") map.set(c.segmentId, c);
+    }
+    return map;
+  }, [sb.animationClips]);
 
   const remainingStats = useMemo(() => {
     let remainingPanels = 0;
@@ -1187,6 +1238,8 @@ export default function StoryboardStep({
                 const segNeed = Math.max(0, targetCount - segFrames.length) + (segFrames.length - segDrawn);
                 const slotCount = Math.max(targetCount, segFrames.length);
                 const isDone = segFrames.length >= targetCount && segDrawn >= targetCount;
+                const segAllApproved = isDone && segFrames.length > 0 && segFrames.every((f) => f.approved);
+                const segClip = segmentVideoStatusMap.get(seg.id);
 
                 return (
                   <section key={seg.id} className="segmentStripBoard" aria-label={`Storyboard Segmen ${seg.index}`}>
@@ -1203,9 +1256,28 @@ export default function StoryboardStep({
                         <span className="statusBadge mono" data-tone={isDone ? "ok" : "warn"}>
                           {isDone ? <CheckIcon size={11} /> : null}
                           <span>
-                            {segDrawn}/{targetCount} Panel
+                            {segDrawn}/{targetCount} Panel{segAllApproved ? " · ACC" : ""}
                           </span>
                         </span>
+                        {isDone && (onAnimateSegment || onGoToAnimate) ? (
+                          <button
+                            type="button"
+                            className="btn btnOk btnSm"
+                            disabled={Boolean(busy)}
+                            onClick={() => handleApproveAndAnimateSegment(seg)}
+                            title={`Kirim langsung semua panel Segmen ${seg.index} ke Gemini Omni 1.2 Flash tanpa upload manual`}
+                          >
+                            <SparklesIcon size={13} />
+                            <span>
+                              {segClip?.status === "ready"
+                                ? `Video Segmen ${seg.index} (Omni 1.2)`
+                                : segAllApproved
+                                  ? `Animasikan Segmen ${seg.index} (Omni 1.2)`
+                                  : `ACC & Animasikan (Omni 1.2)`}
+                            </span>
+                            <ArrowRightIcon size={13} />
+                          </button>
+                        ) : null}
                         {segFrames.length > 0 ? (
                           <button
                             type="button"
@@ -1557,33 +1629,70 @@ export default function StoryboardStep({
                   <button type="button" className="btn btnDanger btnSm" onClick={handleStopAutoSegment}>
                     Hentikan Auto
                   </button>
-                ) : remainingStats.remainingPanels > 0 ? (
+                ) : (
                   <>
-                    <button
-                      type="button"
-                      className="btn btnPrimary btnSm"
-                      disabled={Boolean(busy)}
-                      onClick={() => void handleAutoGenerateAllSegments({ onlySingleSegment: false })}
-                      title="Susun & gambar otomatis seluruh panel di semua segmen sekaligus tanpa perlu klik ulang"
-                    >
-                      <SparklesIcon size={13} />
-                      <span>
-                        Generate Semua Segmen ({remainingStats.remainingPanels} Panel)
-                      </span>
-                    </button>
-                    {segments.length > 1 && activeSegNeed > 0 ? (
-                      <button
-                        type="button"
-                        className="btn btnSm"
-                        disabled={Boolean(busy)}
-                        onClick={() => void handleAutoGenerateSegment(activeSegment)}
-                        title={`Susun & gambar otomatis sisa panel Segmen ${activeSegment.index} saja`}
-                      >
-                        <span>Segmen {activeSegment.index} Saja ({activeSegNeed})</span>
-                      </button>
+                    {activeSegCompleted && (onAnimateSegment || onGoToAnimate) ? (
+                      <>
+                        {!activeSegAllApproved ? (
+                          <button
+                            type="button"
+                            className="btn btnSm"
+                            disabled={Boolean(busy)}
+                            onClick={() => handleApproveSegment(activeSegment)}
+                            title={`Tandai ACC semua ${activeSegmentFrames.length} panel di Segmen ${activeSegment.index}`}
+                          >
+                            <CheckIcon size={13} />
+                            <span>ACC Semua Segmen {activeSegment.index}</span>
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="btn btnOk btnSm"
+                          disabled={Boolean(busy)}
+                          onClick={() => handleApproveAndAnimateSegment(activeSegment)}
+                          title={`Kirim langsung semua panel Segmen ${activeSegment.index} ke Gemini Omni 1.2 Flash tanpa upload manual`}
+                        >
+                          <SparklesIcon size={13} />
+                          <span>
+                            {segmentVideoStatusMap.get(activeSegment.id)?.status === "ready"
+                              ? `Video Segmen ${activeSegment.index} (Omni 1.2)`
+                              : activeSegAllApproved
+                                ? `Animasikan Segmen ${activeSegment.index} (Omni 1.2)`
+                                : `ACC & Animasikan Omni 1.2`}
+                          </span>
+                          <ArrowRightIcon size={13} />
+                        </button>
+                      </>
+                    ) : null}
+                    {remainingStats.remainingPanels > 0 ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btnPrimary btnSm"
+                          disabled={Boolean(busy)}
+                          onClick={() => void handleAutoGenerateAllSegments({ onlySingleSegment: false })}
+                          title="Susun & gambar otomatis seluruh panel di semua segmen sekaligus tanpa perlu klik ulang"
+                        >
+                          <SparklesIcon size={13} />
+                          <span>
+                            Generate Semua Segmen ({remainingStats.remainingPanels} Panel)
+                          </span>
+                        </button>
+                        {segments.length > 1 && activeSegNeed > 0 ? (
+                          <button
+                            type="button"
+                            className="btn btnSm"
+                            disabled={Boolean(busy)}
+                            onClick={() => void handleAutoGenerateSegment(activeSegment)}
+                            title={`Susun & gambar otomatis sisa panel Segmen ${activeSegment.index} saja`}
+                          >
+                            <span>Segmen {activeSegment.index} Saja ({activeSegNeed})</span>
+                          </button>
+                        ) : null}
+                      </>
                     ) : null}
                   </>
-                ) : null}
+                )}
               </div>
             </div>
           ) : null}
@@ -1918,6 +2027,54 @@ export default function StoryboardStep({
                     </div>
                   ) : null}
                 </section>
+
+                {/* DIRECT 1-TAP SEGMENT -> OMNI 1.2 ANIMATION CARD WHEN ACTIVE SEGMENT IS COMPLETE */}
+                {activeSegment && activeSegCompleted && (onAnimateSegment || onGoToAnimate) ? (
+                  <section className="panelCard" aria-label={`Animasikan Segmen ${activeSegment.index} ke Omni 1.2`}>
+                    <div className="panelHead">
+                      <h3>
+                        Segmen {activeSegment.index} Lengkap ({activeSegmentFrames.length} Panel)
+                      </h3>
+                      <span className="statusBadge" data-tone="ok">
+                        <CheckIcon size={12} /> {activeSegAllApproved ? "Semua ACC · Siap Omni 1.2" : "Siap ACC & Animasi"}
+                      </span>
+                    </div>
+                    <p className="fieldHint" style={{ margin: 0 }}>
+                      {activeSegAllApproved
+                        ? `Semua panel Segmen ${activeSegment.index} sudah ACC. Cukup klik tombol di bawah — Frame Awal & Frame Akhir otomatis dikirim ke Gemini Omni 1.2 Flash tanpa upload manual.`
+                        : `Semua gambar Segmen ${activeSegment.index} sudah jadi. ACC sekaligus lalu kirim Frame Awal & Akhir langsung ke Gemini Omni 1.2 Flash tanpa upload manual.`}
+                    </p>
+                    <div className="actionGroup">
+                      {!activeSegAllApproved ? (
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={Boolean(busy)}
+                          onClick={() => handleApproveSegment(activeSegment)}
+                        >
+                          <CheckIcon size={14} />
+                          <span>ACC Semua Segmen {activeSegment.index}</span>
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="btn btnOk"
+                        disabled={Boolean(busy)}
+                        onClick={() => handleApproveAndAnimateSegment(activeSegment)}
+                      >
+                        <SparklesIcon size={14} />
+                        <span>
+                          {segmentVideoStatusMap.get(activeSegment.id)?.status === "ready"
+                            ? `Lihat Video Segmen ${activeSegment.index} (Omni 1.2)`
+                            : activeSegAllApproved
+                              ? `Animasikan Segmen ${activeSegment.index} (Omni 1.2)`
+                              : `ACC & Langsung Animasikan Segmen ${activeSegment.index} (Omni 1.2)`}
+                        </span>
+                        <ArrowRightIcon size={14} />
+                      </button>
+                    </div>
+                  </section>
+                ) : null}
 
                 {/* DEDICATED 1-TAP AUTO-GENERATE ALL SEGMENTS / CONTINUE BAR */}
                 <section className="panelCard continueCard" aria-label="Generate otomatis seluruh segmen">
