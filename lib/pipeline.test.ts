@@ -64,12 +64,18 @@ import {
 } from "./storyboard.ts";
 import {
   buildAntigravityGeminiHandoff,
+  buildFlowConnectorAgentPrompt,
+  buildFlowConnectorCliCommand,
+  buildFlowConnectorFolderSlug,
+  buildFlowConnectorRunnerScript,
   buildOmniAnimationPackZip,
   buildOmniBatchJobsJson,
   buildOmniClipPlans,
   buildOmniInteractionsPayload,
   clampOmniDuration,
   extractOmniVideoFromInteraction,
+  extractVideoIndexFromFilename,
+  matchDownloadedVideoToPlan,
   OMNI_MODEL_ID,
   validateGoogleFileUri,
 } from "./omniAnimation.ts";
@@ -817,8 +823,67 @@ const batchJobs = JSON.parse(buildOmniBatchJobsJson(renderedSegmented, transPlan
 assert.equal(batchJobs[0].first_frame, "keyframes/S01_P01.jpg");
 assert.equal(batchJobs[0].last_frame, "keyframes/S01_P02.jpg");
 
-const omniZip = buildOmniAnimationPackZip(renderedSegmented, segPlans);
+const omniZip = buildOmniAnimationPackZip(renderedSegmented, segPlans, { flowModel: "omni-flash" });
 assert.equal(omniZip[0], 0x50);
 assert.equal(omniZip[1], 0x4b);
+const omniZipAscii = new TextDecoder("latin1").decode(omniZip);
+assert.ok(omniZipAscii.includes("run_flow_connector.mjs"), "ZIP must bundle cross-platform Flow Connector runner");
+assert.ok(omniZipAscii.includes("run_flow_connector.bat"), "ZIP must bundle Windows .bat launcher");
+assert.ok(omniZipAscii.includes("run_flow_connector.command"), "ZIP must bundle macOS .command launcher");
+assert.ok(omniZipAscii.includes("FLOW_CONNECTOR_PROMPT.md"), "ZIP must bundle Flow Connector agent prompt");
+
+// 16. Flow Connector CLI, Runner Script, Agent Prompt & Smart Filename Matcher
+assert.equal(buildFlowConnectorFolderSlug("Subuh di Kampung Asing!"), "nmcgen-subuh-di-kampung-asing");
+assert.equal(extractVideoIndexFromFilename("1 - dawn harbor scene.mp4"), 1);
+assert.equal(extractVideoIndexFromFilename("02_transition.mp4"), 2);
+assert.equal(extractVideoIndexFromFilename("Downloads/nmcgen-test/S02_render.mp4"), 2);
+assert.equal(extractVideoIndexFromFilename("20261126_1732612.mp4"), null, "Must not treat timestamps as clip index");
+
+// Out-of-order Flow Connector download `2 - ...mp4` lands cleanly on Clip 2 even while Clip 1 is waiting!
+const matchedSecond = matchDownloadedVideoToPlan(
+  "2 - menuju fajar.mp4",
+  segPlans,
+  new Set(),
+  segPlans[0].id,
+);
+assert.equal(matchedSecond?.id, segPlans[1].id, "Indexed filename must route to exact segment index");
+
+const matchedFallback = matchDownloadedVideoToPlan(
+  "google_flow_export.mp4",
+  segPlans,
+  new Set(),
+  segPlans[0].id,
+);
+assert.equal(matchedFallback?.id, segPlans[0].id, "Unnumbered filename must fall back to waiting segment");
+
+const flowCliOmni = buildFlowConnectorCliCommand(segPlans[0], {
+  index: 1,
+  folderSlug: "nmcgen-kopi-senja",
+  model: "omni-flash",
+  wait: true,
+});
+assert.ok(flowCliOmni.includes("flow-auto generate create flow-frame-to-video"));
+assert.ok(flowCliOmni.includes('--image "./keyframes/S01_P01.jpg" --image "./keyframes/S01_P02.jpg"'));
+assert.ok(flowCliOmni.includes("--model omni-flash"));
+assert.ok(flowCliOmni.includes("--duration 10"));
+assert.ok(flowCliOmni.includes("--resolution 720p"));
+assert.ok(flowCliOmni.includes("--index 1 --folder nmcgen-kopi-senja --wait --wait-timeout 15"));
+
+const flowCliVeo = buildFlowConnectorCliCommand(segPlans[0], {
+  index: 1,
+  folderSlug: "nmcgen-kopi-senja",
+  model: "veo-3.1-fast",
+});
+assert.ok(flowCliVeo.includes("--model veo-3.1-fast"));
+assert.equal(flowCliVeo.includes("--duration"), false, "Veo models use fixed 8s and omit --duration flag");
+
+const runnerCode = buildFlowConnectorRunnerScript(renderedSegmented, segPlans, { model: "omni-flash" });
+assert.ok(runnerCode.includes('spawnSync("flow-auto"'));
+assert.ok(runnerCode.includes("keyframes/S01_P01.jpg"));
+assert.ok(runnerCode.includes("keyframes/S01_P02.jpg"));
+
+const agentPrompt = buildFlowConnectorAgentPrompt(renderedSegmented, segPlans, { model: "omni-flash" });
+assert.ok(agentPrompt.includes("flow-auto status --site flow"));
+assert.ok(agentPrompt.includes("node run_flow_connector.mjs"));
 
 console.log("nmcGen pipeline tests: all passed");

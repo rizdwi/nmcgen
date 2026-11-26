@@ -15,11 +15,17 @@ import { clipVideoDb, downloadBlob, getApiKey, getKeyHint, setApiKey } from "@/l
 import {
   ANIMATION_APP_LINKS,
   buildAntigravityGeminiHandoff,
+  buildFlowConnectorAgentPrompt,
+  buildFlowConnectorCliCommand,
+  buildFlowConnectorFolderSlug,
   buildOmniAnimationPackZip,
   buildOmniClipPlans,
   clampOmniDuration,
+  FLOW_CONNECTOR_MODELS,
+  matchDownloadedVideoToPlan,
   OMNI_MODEL_ID,
   OMNI_RESOLUTIONS,
+  type FlowConnectorVideoModel,
   type OmniClipPlan,
 } from "@/lib/omniAnimation";
 import { getSelectedFrameImage, getStoryboardSegments, reindexStoryboardFrames } from "@/lib/storyboard";
@@ -68,8 +74,9 @@ interface FsFileHandleLike {
 }
 
 interface FsDirHandleLike {
+  kind?: "directory";
   name: string;
-  values: () => AsyncIterable<FsFileHandleLike | { kind: string; name: string }>;
+  values: () => AsyncIterable<FsFileHandleLike | FsDirHandleLike | { kind: string; name: string }>;
 }
 
 type WindowWithDirPicker = Window & {
@@ -81,6 +88,8 @@ type WindowWithDirPicker = Window & {
 };
 
 const ANIM_ENGINE_STORAGE_KEY = "nmcgen.animEngine";
+const FLOW_CONNECTOR_MODEL_STORAGE_KEY = "nmcgen.flowConnectorModel";
+const FLOW_CLI_INSTALL_CMD = "npm install -g flow-connector-cli";
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v)$/i;
 const DURATION_OPTIONS_FULL = [4, 5, 6, 8, 10, 12, 15];
 const DURATION_OPTIONS_TRANSITION = [4, 5, 6, 8, 10];
@@ -117,6 +126,17 @@ function loadPreferredEngineTab(): EngineTab {
   return "handoff";
 }
 
+function loadPreferredFlowModel(): FlowConnectorVideoModel {
+  if (typeof window === "undefined") return "omni-flash";
+  try {
+    const saved = window.localStorage.getItem(FLOW_CONNECTOR_MODEL_STORAGE_KEY);
+    if (saved === "omni-flash" || saved === "veo-3.1-lite" || saved === "veo-3.1-fast") return saved;
+  } catch {
+    // ignore storage errors
+  }
+  return "omni-flash";
+}
+
 export default function AnimateStep({
   project,
   sb,
@@ -128,6 +148,7 @@ export default function AnimateStep({
   onBackToStoryboard,
 }: AnimateStepProps) {
   const [engineTab, setEngineTab] = useState<EngineTab>(() => loadPreferredEngineTab());
+  const [flowModel, setFlowModel] = useState<FlowConnectorVideoModel>(() => loadPreferredFlowModel());
   const [mode, setMode] = useState<OmniAnimationMode>("segment");
   const [durationSec, setDurationSec] = useState<number>(8);
   const [resolution, setResolution] = useState<OmniResolution>("720p");
@@ -213,10 +234,31 @@ export default function AnimateStep({
     }));
   }, [project, sb, segments, orderedFrames, mode, safeDuration, resolution, promptOverrides]);
 
+  const flowFolderSlug = useMemo(() => buildFlowConnectorFolderSlug(project.name), [project.name]);
+
+  const flowConnectorAgentPrompt = useMemo(
+    () =>
+      buildFlowConnectorAgentPrompt(
+        { ...project, storyboard: { ...sb, segments, frames: orderedFrames } },
+        plans,
+        { model: flowModel },
+      ),
+    [project, sb, segments, orderedFrames, plans, flowModel],
+  );
+
   const masterHandoffPrompt = useMemo(
     () => buildAntigravityGeminiHandoff({ ...project, storyboard: { ...sb, segments, frames: orderedFrames } }, plans),
     [project, sb, segments, orderedFrames, plans],
   );
+
+  const selectFlowModel = (nextModel: FlowConnectorVideoModel) => {
+    setFlowModel(nextModel);
+    try {
+      window.localStorage.setItem(FLOW_CONNECTOR_MODEL_STORAGE_KEY, nextModel);
+    } catch {
+      // ignore storage errors
+    }
+  };
 
   // Saved Gemini key indicator (checks DEFAULT_GEMINI_ID + any Gemini profile saved in Settings)
   const resolvedGemini = useMemo(() => {
@@ -297,15 +339,16 @@ export default function AnimateStep({
     const bytes = buildOmniAnimationPackZip(
       { ...project, storyboard: { ...sb, segments, frames: orderedFrames } },
       plans,
+      { flowModel },
     );
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
     const safeName =
       (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
-      "-omni-1.2-pack.zip";
+      "-flow-connector-pack.zip";
     downloadBlob(new Blob([copy], { type: "application/zip" }), safeName);
     setGlobalNotice(
-      `Paket ZIP animasi (${plans.length} klip + keyframe + prompt Antigravity/Gemini/Omni 1.2) berhasil diunduh.`,
+      `Paket Flow Connector (${plans.length} klip + keyframe Awal/Akhir + run_flow_connector.mjs/.bat/.command) berhasil diunduh! Ekstrak lalu jalankan skripnya saat tab Google Flow terbuka.`,
     );
   };
 
@@ -786,6 +829,31 @@ export default function AnimateStep({
     });
   };
 
+  // Mobile/iOS-safe 2-frame save (uses native Share Sheet when supported so both Start & End frames save to Photos)
+  const handleSaveFramesForPlan = async (plan: OmniClipPlan) => {
+    if (plan.images.length === 0) return;
+    const segTag = `S${String(plan.segmentIndex).padStart(2, "0")}`;
+    const files = plan.images.map((im, idx) => {
+      const blob = base64DataUrlToBlob(im.dataUrl);
+      const role = plan.images.length === 2 ? (idx === 0 ? "AWAL" : "AKHIR") : `P${idx + 1}`;
+      const ext = im.fileName.split(".").pop() || "jpg";
+      return new File([blob], `${segTag}_${role}.${ext}`, { type: blob.type || "image/jpeg" });
+    });
+
+    const nav = typeof navigator !== "undefined" ? navigator : null;
+    if (nav && typeof nav.share === "function" && typeof nav.canShare === "function" && nav.canShare({ files })) {
+      try {
+        await nav.share({ files, title: `Frame ${plan.label}` });
+        setGlobalNotice(`Frame ${plan.label} siap disimpan ke Galeri/Foto.`);
+        return;
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+      }
+    }
+    downloadFramesForPlan(plan);
+    setGlobalNotice(`Mengunduh ${files.length} frame (${files.map((f) => f.name).join(" & ")}).`);
+  };
+
   // 1-Tap Flow Express Launch: copy prompt + save Start & End frames + arm return watcher + open Google Flow!
   const handleLaunchFlowForClip = async (plan: OmniClipPlan) => {
     setGlobalError("");
@@ -818,9 +886,38 @@ export default function AnimateStep({
 
     setGlobalNotice(
       watchDirHandleRef.current
-        ? `Google Flow dibuka untuk ${plan.label}! ${copied ? "Prompt tersalin + " : ""}${frameHint}. Setelah render selesai & kamu klik Download di Flow, nmcGen otomatis menempelkan MP4-nya di belakang layar!`
+        ? `Google Flow dibuka untuk ${plan.label}! ${copied ? "Prompt tersalin + " : ""}${frameHint}. Setelah render selesai & diunduh Flow, nmcGen otomatis menempelkan MP4-nya di belakang layar!`
         : `Google Flow dibuka untuk ${plan.label}! ${copied ? "Prompt tersalin + " : ""}${frameHint}. Setelah download MP4 dari Flow, kembali ke tab ini untuk 1-klik tempel otomatis.`,
     );
+  };
+
+  // Collect video files at root + 1-level subfolders (catches Flow Connector's Downloads/<folderSlug>/1 - *.mp4!)
+  const collectVideoEntries = async (
+    rootDir: FsDirHandleLike,
+  ): Promise<Array<{ file: File; folderLabel: string; sigKey: string }>> => {
+    const out: Array<{ file: File; folderLabel: string; sigKey: string }> = [];
+    const scanOneDir = async (dir: FsDirHandleLike, prefix: string) => {
+      for await (const entry of dir.values()) {
+        if (entry.kind === "file") {
+          const name = entry.name || "";
+          if (!VIDEO_EXT_RE.test(name) || name.startsWith(".") || name.endsWith(".crdownload")) continue;
+          const file = await (entry as FsFileHandleLike).getFile().catch(() => null);
+          if (!file || file.size === 0) continue;
+          const folderLabel = prefix ? `${rootDir.name}/${prefix}` : rootDir.name;
+          out.push({ file, folderLabel, sigKey: `${prefix}/${file.name}` });
+        } else if (entry.kind === "directory" && !prefix) {
+          const subName = entry.name || "";
+          if (!subName || subName.startsWith(".")) continue;
+          try {
+            await scanOneDir(entry as FsDirHandleLike, subName);
+          } catch {
+            // Skip unreadable subfolder
+          }
+        }
+      }
+    };
+    await scanOneDir(rootDir, "");
+    return out;
   };
 
   // Background Downloads folder scanner (File System Access API on Desktop Chrome / Edge / Opera / Brave)
@@ -828,16 +925,11 @@ export default function AnimateStep({
     const dir = watchDirHandleRef.current;
     if (!dir) return;
     try {
-      const freshFiles: File[] = [];
-      for await (const entry of dir.values()) {
-        if (entry.kind !== "file") continue;
-        const name = entry.name || "";
-        if (!VIDEO_EXT_RE.test(name) || name.startsWith(".") || name.endsWith(".crdownload")) continue;
-        const fileHandle = entry as FsFileHandleLike;
-        const file = await fileHandle.getFile().catch(() => null);
-        if (!file || file.size === 0) continue;
+      const entries = await collectVideoEntries(dir);
+      const freshItems: Array<{ file: File; folderLabel: string }> = [];
 
-        const sig = `${file.name}:${file.lastModified}:${file.size}`;
+      for (const { file, folderLabel, sigKey } of entries) {
+        const sig = `${sigKey}:${file.lastModified}:${file.size}`;
         if (seenFilesRef.current.has(sig)) continue;
         if (file.lastModified < watchStartedAtRef.current - 5000) {
           seenFilesRef.current.add(sig);
@@ -845,29 +937,39 @@ export default function AnimateStep({
         }
 
         // Wait until file size is stable across two scans (download fully flushed to disk)
-        const prevSize = pendingFileSizesRef.current.get(file.name);
+        const prevSize = pendingFileSizesRef.current.get(sigKey);
         if (prevSize !== file.size && Date.now() - file.lastModified < 2000) {
-          pendingFileSizesRef.current.set(file.name, file.size);
+          pendingFileSizesRef.current.set(sigKey, file.size);
           continue;
         }
-        pendingFileSizesRef.current.delete(file.name);
+        pendingFileSizesRef.current.delete(sigKey);
         seenFilesRef.current.add(sig);
-        freshFiles.push(file);
+        freshItems.push({ file, folderLabel });
       }
 
-      freshFiles.sort((a, b) => a.lastModified - b.lastModified);
-      for (const file of freshFiles) {
-        const curPlans = plansRef.current;
-        const target =
-          curPlans.find((p) => p.id === waitingFlowPlanIdRef.current && !clipStatesRef.current[p.id]?.blobUrl) ??
-          curPlans.find((p) => !clipStatesRef.current[p.id]?.blobUrl);
+      freshItems.sort((a, b) => a.file.lastModified - b.file.lastModified);
+      const curPlans = plansRef.current;
+      const attachedIds = new Set(
+        Object.entries(clipStatesRef.current)
+          .filter(([, st]) => Boolean(st?.blobUrl))
+          .map(([id]) => id),
+      );
+
+      for (const { file, folderLabel } of freshItems) {
+        const target = matchDownloadedVideoToPlan(
+          file.name,
+          curPlans,
+          attachedIds,
+          waitingFlowPlanIdRef.current,
+        );
         if (!target) break;
+        attachedIds.add(target.id);
         await attachVideoBlobToPlan(
           target,
           file,
           file.name,
           "flow-upload",
-          `Otomatis terpasang dari folder "${dir.name}": "${file.name}" → ${target.label}!`,
+          `Otomatis terpasang dari "${folderLabel}": "${file.name}" → ${target.label}!`,
         );
       }
     } catch {
@@ -887,13 +989,11 @@ export default function AnimateStep({
         mode: "read",
         startIn: "downloads",
       });
-      // Snapshot existing videos so old downloads are ignored
+      // Snapshot existing videos in root + 1-level subfolders so old downloads are ignored
+      const existing = await collectVideoEntries(dir);
       const snapshot = new Set<string>();
-      for await (const entry of dir.values()) {
-        if (entry.kind !== "file") continue;
-        if (!VIDEO_EXT_RE.test(entry.name || "")) continue;
-        const f = await (entry as FsFileHandleLike).getFile().catch(() => null);
-        if (f) snapshot.add(`${f.name}:${f.lastModified}:${f.size}`);
+      for (const item of existing) {
+        snapshot.add(`${item.sigKey}:${item.file.lastModified}:${item.file.size}`);
       }
       seenFilesRef.current = snapshot;
       pendingFileSizesRef.current.clear();
@@ -902,7 +1002,7 @@ export default function AnimateStep({
       setWatchFolderName(dir.name || "Downloads");
       setGlobalError("");
       setGlobalNotice(
-        `Pantau otomatis folder "${dir.name || "Downloads"}" aktif! Setiap MP4 baru yang kamu unduh dari Google Flow akan otomatis menempel ke segmen aktif di belakang layar.`,
+        `Pantau otomatis folder "${dir.name || "Downloads"}" (+ subfolder "${flowFolderSlug}") aktif! Setiap MP4 baru dari Flow Connector otomatis langsung menempel sesuai nomor segmen.`,
       );
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
@@ -1045,7 +1145,7 @@ export default function AnimateStep({
       setPendingSegmentId(null);
       setWaitingFlowPlanId(targetPlan.id);
       setGlobalNotice(
-        `${targetPlan.label} siap! Klik "Kirim ke Google Flow" untuk otomatis salin prompt + unduh Frame Awal & Akhir lalu buka Flow.`,
+        `${targetPlan.label} siap! Unduh Paket Flow Connector (.zip) untuk render otomatis via Chrome Extension, atau klik "Salin CLI Flow" / "Buka Flow".`,
       );
       return;
     }
@@ -1484,7 +1584,7 @@ export default function AnimateStep({
           {orderedFrames.length > 0 ? (
             <button type="button" className="btn btnPrimary btnSm" onClick={handleDownloadOmniPackZip}>
               <DownloadIcon size={14} />
-              <span>Unduh Paket Animasi ZIP</span>
+              <span>Unduh Paket Flow Connector (.zip)</span>
             </button>
           ) : null}
         </div>
@@ -1538,12 +1638,12 @@ export default function AnimateStep({
               onClick={() => selectEngineTab("handoff")}
             >
               <div className="animateEngineTop">
-                <strong>Google Flow / Gemini Web</strong>
+                <strong>Google Flow + Flow Connector</strong>
                 <span className="metaTag mono" data-tone={watchFolderName ? "ok" : undefined}>
-                  {watchFolderName ? "Auto-Watch Aktif" : "Tanpa Billing API"}
+                  {watchFolderName ? "Auto-Watch Aktif" : "Otomatis via Ekstensi"}
                 </span>
               </div>
-              <span>1-klik kirim ke Google Flow, pantau unduhan otomatis di latar belakang &amp; gabung MP4</span>
+              <span>Auto-upload Frame Awal → Akhir via Flow Connector, tangkap MP4 otomatis &amp; gabung jadi 1 film</span>
             </button>
 
             <button
@@ -1649,7 +1749,7 @@ export default function AnimateStep({
           ) : null}
 
           {/* =============================================================== */}
-          {/* TAB 1: GOOGLE FLOW EXPRESS + ANTIGRAVITY / GEMINI WEB           */}
+          {/* TAB 1: GOOGLE FLOW + FLOW CONNECTOR AUTOMATION                  */}
           {/* =============================================================== */}
           {engineTab === "handoff" ? (
             <div className="omniApiWrap">
@@ -1755,13 +1855,109 @@ export default function AnimateStep({
               ) : null}
 
               <div className="animateHandoffGrid">
-                {/* Left: Google Flow Background Watcher & Express Tools */}
+                {/* Left: Flow Connector Full Automation + Background Downloads Auto-Watcher */}
                 <section className="panelCard">
                   <div className="panelHead">
-                    <h3>1. Otomatisasi Google Flow</h3>
+                    <h3>1. Otomatis via Flow Connector</h3>
                     <span className="metaTag mono">
                       {readyClips.length}/{plans.length} video terpasang
                     </span>
+                  </div>
+
+                  {/* Flow Connector Chrome Extension + CLI Bridge Card */}
+                  <div className="flowConnectorCard">
+                    <div className="panelHead">
+                      <div>
+                        <strong>Auto-Upload &amp; Render Google Flow (Chrome Desktop)</strong>
+                        <p className="fieldHint" style={{ margin: "2px 0 0" }}>
+                          Tidak perlu upload gambar &amp; tempel prompt manual — ekstensi <strong>Flow Connector</strong>{" "}
+                          mengirim Frame Awal + Akhir, menekan Generate, dan mengunduh semua MP4 otomatis.
+                        </p>
+                      </div>
+                      <span className="statusBadge mono" data-tone="ok">
+                        Gratis 30 Video/Hari
+                      </span>
+                    </div>
+
+                    <label className="inlineControl" style={{ width: "100%", justifyContent: "space-between" }}>
+                      <span className="fieldLabel">Model Google Flow:</span>
+                      <select
+                        className="select inputSm"
+                        value={flowModel}
+                        onChange={(e) => selectFlowModel(e.target.value as FlowConnectorVideoModel)}
+                        aria-label="Model video Google Flow Connector"
+                      >
+                        {FLOW_CONNECTOR_MODELS.map((m) => (
+                          <option key={m.value} value={m.value}>
+                            {m.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <ol className="flowConnectorSteps">
+                      <li>
+                        <strong>Pasang sekali di Chrome/Edge Desktop:</strong>{" "}
+                        <a
+                          href={ANIMATION_APP_LINKS.flowConnectorExtension}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flowInlineLink"
+                        >
+                          Ekstensi Flow Connector (Chrome Web Store)
+                        </a>{" "}
+                        lalu pasang CLI lokal:
+                        <div className="flowCodeChip">
+                          <code className="mono">{FLOW_CLI_INSTALL_CMD}</code>
+                          <button
+                            type="button"
+                            className="btn btnGhost btnSm"
+                            onClick={() => void handleCopyText(FLOW_CLI_INSTALL_CMD, "flow-cli-install")}
+                          >
+                            {copyFeedback === "flow-cli-install" ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
+                            <span>{copyFeedback === "flow-cli-install" ? "Tersalin" : "Salin"}</span>
+                          </button>
+                        </div>
+                      </li>
+                      <li>
+                        <strong>Jalankan otomatis semua segmen:</strong> Unduh paket ZIP di bawah → ekstrak → klik 2×{" "}
+                        <code className="mono">run_flow_connector.bat</code> (Windows) /{" "}
+                        <code className="mono">run_flow_connector.command</code> (Mac) atau{" "}
+                        <code className="mono">node run_flow_connector.mjs</code> sambil tab{" "}
+                        <strong>flow.google.com</strong> terbuka &amp; terlihat.
+                      </li>
+                      <li>
+                        <strong>Hasil MP4 otomatis masuk kembali ke nmcGen:</strong> Aktifkan{" "}
+                        <strong>Pantau Downloads</strong> di bawah — skrip menyimpan hasil ke{" "}
+                        <code className="mono">Downloads/{flowFolderSlug}/</code> dan nmcGen otomatis menempelkannya ke
+                        Klip 01..{String(plans.length).padStart(2, "0")}.
+                      </li>
+                    </ol>
+
+                    <div className="actionGroup">
+                      <button type="button" className="btn btnPrimary" onClick={handleDownloadOmniPackZip}>
+                        <DownloadIcon size={14} />
+                        <span>Unduh Paket Flow Connector (.zip)</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => void handleCopyText(flowConnectorAgentPrompt, "flow-agent")}
+                        title="Tempel ke Antigravity Desktop / Claude Code / Cursor yang terhubung MCP flow-auto-mcp"
+                      >
+                        {copyFeedback === "flow-agent" ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+                        <span>
+                          {copyFeedback === "flow-agent" ? "Tersalin!" : "Salin Prompt Agent Flow"}
+                        </span>
+                      </button>
+                    </div>
+
+                    <p className="fieldHint" style={{ margin: 0 }}>
+                      Catatan: Ekstensi Chrome hanya berjalan di <strong>Laptop/PC (Chrome/Edge Desktop)</strong> — iPhone
+                      tidak bisa memasang ekstensi Chrome. Pastikan memasang ekstensi{" "}
+                      <strong>Flow Connector — connect your coding agent to Google Flow image &amp; video</strong> dari
+                      tautan di atas.
+                    </p>
                   </div>
 
                   {/* Desktop Background Downloads Auto-Watcher (Official File System Access API) */}
@@ -1769,15 +1965,15 @@ export default function AnimateStep({
                     <div style={{ flex: "1 1 220px" }}>
                       <strong>
                         {watchFolderName
-                          ? `Pantau Otomatis Aktif: folder "${watchFolderName}"`
-                          : "Auto-Tempel di Latar Belakang (Chrome/Edge Desktop)"}
+                          ? `Pantau Otomatis Aktif: "${watchFolderName}" (+ ${flowFolderSlug})`
+                          : "Auto-Tempel MP4 dari Downloads (Chrome/Edge Desktop)"}
                       </strong>
                       <p className="fieldHint" style={{ margin: "3px 0 0" }}>
                         {watchFolderName
-                          ? "Setiap MP4 baru yang kamu klik Download di Google Flow otomatis langsung menempel ke segmen aktif & tersimpan lokal."
+                          ? `Memantau "${watchFolderName}/" & "${watchFolderName}/${flowFolderSlug}/" tiap 2,5 detik. MP4 bernomor 1..${plans.length} otomatis menempel ke segmen tepat!`
                           : folderWatchSupported
-                            ? "Pilih folder Downloads sekali saja — saat kamu download MP4 dari Google Flow, nmcGen yang jalan di tab belakang otomatis menangkap & menempelkannya ke segmen."
-                            : "Di browser HP (Safari/mobile), browser membatasi akses folder otomatis. Gunakan tombol 'Kirim ke Google Flow' lalu klik 'Tempel MP4' atau 'Unggah Banyak MP4 Sekaligus' saat kembali."}
+                            ? `Pilih folder Downloads sekali saja — saat Flow Connector mengunduh MP4 ke Downloads/${flowFolderSlug}/, nmcGen otomatis menangkap & menempelkannya ke segmen sesuai nomor.`
+                            : "Di browser HP (iPhone/Safari), folder otomatis dibatasi OS. Gunakan 'Simpan Frame' → buka Google Flow → lalu 'Tempel MP4' atau 'Unggah Banyak MP4 Sekaligus'."}
                       </p>
                     </div>
                     <div className="actionGroup">
@@ -1815,7 +2011,7 @@ export default function AnimateStep({
                   <div className="actionGroup">
                     <button
                       type="button"
-                      className="btn btnPrimary"
+                      className="btn"
                       onClick={() => batchVideoInputRef.current?.click()}
                       title="Pilih beberapa berkas MP4 hasil Google Flow sekaligus untuk dipasang otomatis berurutan ke Segmen 1..N"
                     >
@@ -1824,21 +2020,26 @@ export default function AnimateStep({
                     </button>
                     <button
                       type="button"
-                      className="btn"
+                      className="btn btnGhost"
                       onClick={() => void handleCopyText(masterHandoffPrompt, "master")}
                     >
                       {copyFeedback === "master" ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
                       <span>
-                        {copyFeedback === "master" ? "Tersalin!" : "Salin Prompt Master"}
+                        {copyFeedback === "master" ? "Tersalin!" : "Prompt Master"}
                       </span>
-                    </button>
-                    <button type="button" className="btn btnGhost" onClick={handleDownloadOmniPackZip}>
-                      <DownloadIcon size={14} />
-                      <span>ZIP</span>
                     </button>
                   </div>
 
                   <div className="handoffAppRow">
+                    <a
+                      href={ANIMATION_APP_LINKS.flowConnectorExtension}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="btn btnSm"
+                    >
+                      <ExternalLinkIcon size={13} />
+                      <span>Pasang Flow Connector</span>
+                    </a>
                     <a
                       href={ANIMATION_APP_LINKS.googleFlow}
                       target="_blank"
@@ -1846,7 +2047,7 @@ export default function AnimateStep({
                       className="btn btnSm"
                     >
                       <ExternalLinkIcon size={13} />
-                      <span>Google Flow (Omni 1.2)</span>
+                      <span>Google Flow</span>
                     </a>
                     <a
                       href={ANIMATION_APP_LINKS.googleVids}
@@ -1855,7 +2056,7 @@ export default function AnimateStep({
                       className="btn btnSm"
                     >
                       <ExternalLinkIcon size={13} />
-                      <span>Google Vids (Gratis 15 dtk)</span>
+                      <span>Google Vids</span>
                     </a>
                     <a
                       href={ANIMATION_APP_LINKS.gemini}
@@ -1869,6 +2070,13 @@ export default function AnimateStep({
                   </div>
 
                   <details className="subtleDetails">
+                    <summary>Pratinjau Prompt Agent Flow Connector ({plans.length} Klip)</summary>
+                    <div className="subtleDetailsBody">
+                      <pre className="scriptPeekPre">{flowConnectorAgentPrompt}</pre>
+                    </div>
+                  </details>
+
+                  <details className="subtleDetails">
                     <summary>Pratinjau Prompt Master Antigravity / Gemini</summary>
                     <div className="subtleDetailsBody">
                       <pre className="scriptPeekPre">{masterHandoffPrompt}</pre>
@@ -1876,17 +2084,24 @@ export default function AnimateStep({
                   </details>
                 </section>
 
-                {/* Right: Per-Segment Google Flow Express Cards (1-Tap Launch + Attach MP4) */}
+                {/* Right: Per-Segment Google Flow Express Cards (CLI Copy + Manual Launch + Attach MP4) */}
                 <section className="panelCard">
                   <div className="panelHead">
-                    <h3>2. Jalur Cepat Per-Segmen (Frame Awal → Akhir)</h3>
-                    <span className="fieldHint">Klik Kirim ke Flow → hasil MP4 tempel di sini</span>
+                    <h3>2. Jalur Per-Segmen (Frame Awal → Akhir)</h3>
+                    <span className="fieldHint">Auto-Watch / Salin CLI Flow / Tempel MP4</span>
                   </div>
 
                   <div className="omniClipList">
                     {plans.map((plan, idx) => {
                       const st = clipStates[plan.id];
                       const isWaiting = waitingFlowPlanId === plan.id && !st?.blobUrl;
+                      const cliCmd = buildFlowConnectorCliCommand(plan, {
+                        index: idx + 1,
+                        folderSlug: flowFolderSlug,
+                        model: flowModel,
+                        wait: true,
+                      });
+                      const cliCopyKey = `cli-${plan.id}`;
 
                       return (
                         <article
@@ -1934,16 +2149,16 @@ export default function AnimateStep({
                             <p className="fieldHint">Belum ada gambar panel tergenerate di klip ini.</p>
                           )}
 
-                          {/* 1-Tap Launch Google Flow + Direct Attach MP4 Controls */}
+                          {/* Flow Connector CLI + Manual Flow + Direct Attach MP4 Controls */}
                           <div className="actionGroup">
                             <button
                               type="button"
                               className={st?.blobUrl ? "btn btnSm" : "btn btnPrimary btnSm"}
-                              onClick={() => void handleLaunchFlowForClip(plan)}
-                              title="Otomatis salin prompt, unduh Frame Awal & Akhir, lalu buka Google Flow"
+                              onClick={() => void handleCopyText(cliCmd, cliCopyKey)}
+                              title={`Salin perintah flow-auto untuk Klip ${idx + 1} (jalankan di dalam folder ekstrak ZIP)`}
                             >
-                              <ExternalLinkIcon size={13} />
-                              <span>Kirim ke Google Flow</span>
+                              {copyFeedback === cliCopyKey ? <CheckIcon size={13} /> : <SparklesIcon size={13} />}
+                              <span>{copyFeedback === cliCopyKey ? "CLI Tersalin!" : "Salin CLI Flow"}</span>
                             </button>
 
                             <button
@@ -1953,7 +2168,29 @@ export default function AnimateStep({
                               title="Pilih berkas MP4 hasil unduhan Google Flow untuk ditempel ke segmen ini"
                             >
                               <UploadIcon size={13} />
-                              <span>{st?.blobUrl ? "Ganti MP4" : "Tempel / Unggah MP4"}</span>
+                              <span>{st?.blobUrl ? "Ganti MP4" : "Tempel MP4"}</span>
+                            </button>
+
+                            {plan.images.length > 0 ? (
+                              <button
+                                type="button"
+                                className="btn btnGhost btnSm"
+                                onClick={() => void handleSaveFramesForPlan(plan)}
+                                title="Simpan Frame Awal & Akhir ke Galeri/Downloads"
+                              >
+                                <DownloadIcon size={13} />
+                                <span>Frame</span>
+                              </button>
+                            ) : null}
+
+                            <button
+                              type="button"
+                              className="btn btnGhost btnSm"
+                              onClick={() => void handleLaunchFlowForClip(plan)}
+                              title="Buka Google Flow manual + salin prompt + unduh Frame Awal & Akhir"
+                            >
+                              <ExternalLinkIcon size={13} />
+                              <span>Buka Flow</span>
                             </button>
 
                             <button
@@ -2004,8 +2241,8 @@ export default function AnimateStep({
                             <div className="flowDropHint">
                               <span>
                                 {watchFolderName
-                                  ? `Auto-Watch aktif: hasil download Flow akan otomatis menempel ke sini.`
-                                  : `Seret MP4 hasil Flow ke kartu ini, tekan Ctrl+V, atau klik Tempel MP4.`}
+                                  ? `Auto-Watch aktif: MP4 di Downloads/${flowFolderSlug}/${idx + 1} - *.mp4 otomatis menempel ke sini.`
+                                  : `Jalankan run_flow_connector.mjs / seret MP4 ke kartu ini / tekan Ctrl+V.`}
                               </span>
                             </div>
                           )}

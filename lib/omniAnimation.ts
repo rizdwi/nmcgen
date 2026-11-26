@@ -27,7 +27,38 @@ export const ANIMATION_APP_LINKS = {
   googleFlow: "https://labs.google/fx/tools/flow",
   googleVids: "https://workspace.google.com/products/vids/",
   aiStudio: "https://aistudio.google.com/apikey",
+  flowConnectorExtension:
+    "https://chromewebstore.google.com/detail/flow-connector-%E2%80%94-connect/feldfgfggmlcnoihdjbcemjknoegocnm",
+  flowConnectorDocs: "https://github.com/srijan-kaiwart/flow-connector",
 } as const;
+
+export type FlowConnectorVideoModel = "omni-flash" | "veo-3.1-lite" | "veo-3.1-fast";
+
+export const FLOW_CONNECTOR_MODELS: Array<{
+  value: FlowConnectorVideoModel;
+  label: string;
+  hint: string;
+  supportsCustomDuration: boolean;
+}> = [
+  {
+    value: "omni-flash",
+    label: "Omni 1.2 Flash (Hemat · Awal → Akhir)",
+    hint: "Mendukung Frame Awal & Akhir, durasi 3–10 dtk, kredit paling hemat di Google Flow",
+    supportsCustomDuration: true,
+  },
+  {
+    value: "veo-3.1-lite",
+    label: "Veo 3.1 Lite (8 dtk · Awal → Akhir)",
+    hint: "Interpolasi First→Last Frame 8 dtk otomatis di Google Flow (~20 kredit)",
+    supportsCustomDuration: false,
+  },
+  {
+    value: "veo-3.1-fast",
+    label: "Veo 3.1 Fast (8 dtk · Gerak Halus)",
+    hint: "Interpolasi First→Last Frame 8 dtk dengan kualitas gerak lebih halus",
+    supportsCustomDuration: false,
+  },
+];
 
 export const OMNI_RESOLUTIONS: Array<{ value: OmniResolution; label: string; hint: string }> = [
   { value: "360p", label: "360p (Draft Cepat)", hint: "Paling cepat & hemat untuk cek gerak" },
@@ -661,11 +692,353 @@ function decodeBase64Bytes(b64: string): Uint8Array | null {
 }
 
 /**
- * Packages the full Antigravity / Gemini / Omni 1.2 Flash animation kit into a zero-dependency ZIP.
+ * Clean subfolder name inside Downloads/ used by Flow Connector `--folder`.
  */
-export function buildOmniAnimationPackZip(project: NmcProject, plans: OmniClipPlan[]): Uint8Array {
+export function buildFlowConnectorFolderSlug(projectName: string): string {
+  const slug =
+    projectName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 36) || "proyek";
+  return `nmcgen-${slug}`;
+}
+
+/**
+ * Extracts a 1-based clip/segment index from a downloaded video filename
+ * (supports Flow Connector's `--index` prefix like `1 - ...mp4` as well as `S01_...mp4` / `clip-02.mp4`).
+ */
+export function extractVideoIndexFromFilename(filename: string): number | null {
+  const base = (filename.split(/[/\\]/).pop() || filename).trim();
+  const leading = base.match(/^0?([1-9]\d?)(?:\s*[-_. ]|$)/);
+  if (leading) {
+    const n = Number(leading[1]);
+    if (n >= 1 && n <= 99) return n;
+  }
+  const tagged = base.match(/(?:^|[\s_-])(?:s|seg|segmen|clip|klip)[\s_-]?0?([1-9]\d?)(?:\b|[._-])/i);
+  if (tagged) {
+    const n = Number(tagged[1]);
+    if (n >= 1 && n <= 99) return n;
+  }
+  return null;
+}
+
+/**
+ * Matches a newly downloaded video file (from Downloads/ or Downloads/<folder>/) to the exact target clip plan.
+ * Prioritizes `--index` / segment number in filename so out-of-order Flow Connector batch finishes still land accurately.
+ */
+export function matchDownloadedVideoToPlan(
+  filename: string,
+  plans: OmniClipPlan[],
+  attachedIds: ReadonlySet<string>,
+  waitingPlanId?: string | null,
+): OmniClipPlan | null {
+  const indexed = extractVideoIndexFromFilename(filename);
+  if (indexed !== null && indexed >= 1 && indexed <= plans.length) {
+    const byIdx = plans[indexed - 1];
+    if (byIdx && !attachedIds.has(byIdx.id)) return byIdx;
+  }
+  if (waitingPlanId) {
+    const waiting = plans.find((p) => p.id === waitingPlanId && !attachedIds.has(p.id));
+    if (waiting) return waiting;
+  }
+  return plans.find((p) => !attachedIds.has(p.id)) ?? null;
+}
+
+/**
+ * Generates a verified `flow-auto` CLI command for `flow-connector-cli` (Flow Connector Chrome Extension).
+ */
+export function buildFlowConnectorCliCommand(
+  plan: OmniClipPlan,
+  options: {
+    index: number;
+    folderSlug: string;
+    model?: FlowConnectorVideoModel;
+    wait?: boolean;
+  },
+): string {
+  const model: FlowConnectorVideoModel = options.model ?? "omni-flash";
+  const mode = plan.images.length > 0 ? "flow-frame-to-video" : "flow-text-to-video";
+  const safePrompt = plan.prompt
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r?\n+/g, " ")
+    .trim();
+  const resFlag = plan.resolution === "360p" ? "360p" : "720p";
+
+  const parts: string[] = [
+    "flow-auto",
+    "generate",
+    "create",
+    mode,
+    `--prompt "${safePrompt}"`,
+  ];
+
+  for (const im of plan.images.slice(0, 2)) {
+    parts.push(`--image "./${im.fileName}"`);
+  }
+
+  parts.push(`--model ${model}`);
+  parts.push(`--aspect-ratio ${plan.aspectRatio}`);
+  if (model === "omni-flash") {
+    parts.push(`--duration ${plan.durationSec}`);
+  }
+  parts.push(`--resolution ${resFlag}`);
+  parts.push(`--index ${options.index}`);
+  parts.push(`--folder ${options.folderSlug}`);
+  if (options.wait) {
+    parts.push("--wait", "--wait-timeout 15");
+  }
+  return parts.join(" ");
+}
+
+/**
+ * Generates a ready-to-paste prompt for AI Coding Agents (Antigravity Desktop / Claude Code / Cursor / Gemini CLI)
+ * connected to the Flow Connector Chrome Extension (`flow-connector-cli` / `flow-auto-mcp`).
+ */
+export function buildFlowConnectorAgentPrompt(
+  project: NmcProject,
+  plans: OmniClipPlan[],
+  options?: { model?: FlowConnectorVideoModel },
+): string {
   const sb = ensureStoryboard(project);
+  const model: FlowConnectorVideoModel = options?.model ?? "omni-flash";
+  const folderSlug = buildFlowConnectorFolderSlug(project.name);
+
+  const lines: string[] = [
+    `# Otomatisasi Google Flow via Flow Connector — ${project.name}`,
+    "",
+    `Tolong jalankan animasi otomatis seluruh segmen proyek **"${project.name}"** di Google Flow menggunakan **Flow Connector** (\`flow-auto\` / MCP \`flow-connector\`).`,
+    "",
+    `- **Model Target:** \`${model}\` (${model === "omni-flash" ? "Omni 1.2 Flash · mendukung Frame Awal & Akhir + durasi fleksibel" : "Veo 3.1 · 8 dtk · Frame Awal & Akhir"})`,
+    `- **Rasio:** \`${sb.aspectRatio}\` · **Total Klip:** ${plans.length}`,
+    `- **Folder Unduhan Wajib (\`--folder\`):** \`${folderSlug}\` (agar nmcGen otomatis menangkap semua MP4 via Pantau Downloads)`,
+    "",
+    `## Langkah Eksekusi`,
+    `1. Cek koneksi dulu dengan \`flow-auto status --site flow\`. Pastikan tab \`https://flow.google.com\` terbuka & terlihat di Chrome Desktop.`,
+    `2. Pastikan folder proyek ini adalah folder hasil ekstrak paket ZIP dari nmcGen (berisi folder \`keyframes/\` dan \`run_flow_connector.mjs\`).`,
+    `3. Cara tercepat: jalankan \`node run_flow_connector.mjs\` di terminal (atau jalankan perintah \`flow-auto generate create\` per klip di bawah tanpa \`--wait\` agar masuk antrean batch dengan \`--index 1..${plans.length}\`, lalu pantau dengan \`flow-auto generate list\`).`,
+    `4. Setelah selesai, jalankan \`flow-auto generate list --failed --run ${folderSlug}\` dan laporkan daftar file MP4 yang sudah tersimpan di \`Downloads/${folderSlug}/\`.`,
+    "",
+    `## Daftar Klip Siap Kirim (Frame Awal → Akhir)`,
+  ];
+
+  plans.forEach((plan, idx) => {
+    const cmd = buildFlowConnectorCliCommand(plan, {
+      index: idx + 1,
+      folderSlug,
+      model,
+      wait: plans.length === 1,
+    });
+    lines.push(
+      "",
+      `### Klip ${String(idx + 1).padStart(2, "0")} — ${plan.label} (${plan.summary})`,
+      `- **Keyframe:** ${plan.images.map((im) => `\`${im.fileName}\``).join(" → ") || "(Text-to-Video)"}`,
+      "```bash",
+      cmd,
+      "```",
+    );
+  });
+
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Generates a self-contained cross-platform Node.js 20+ runner (`run_flow_connector.mjs`)
+ * that drives Flow Connector CLI (`flow-auto`) for all or a single segment with zero shell-quoting bugs.
+ */
+export function buildFlowConnectorRunnerScript(
+  project: NmcProject,
+  plans: OmniClipPlan[],
+  options?: { model?: FlowConnectorVideoModel },
+): string {
+  const defaultModel: FlowConnectorVideoModel = options?.model ?? "omni-flash";
+  const folderSlug = buildFlowConnectorFolderSlug(project.name);
+
+  const manifest = plans.map((plan, idx) => ({
+    index: idx + 1,
+    label: plan.label,
+    mode: plan.images.length > 0 ? "flow-frame-to-video" : "flow-text-to-video",
+    images: plan.images.slice(0, 2).map((im) => im.fileName),
+    durationSec: plan.durationSec,
+    resolution: plan.resolution === "360p" ? "360p" : "720p",
+    aspectRatio: plan.aspectRatio,
+    prompt: plan.prompt,
+  }));
+
+  return [
+    "#!/usr/bin/env node",
+    "// Auto-generated by nmcGen — Flow Connector Automated Runner (Node.js 20+)",
+    '// Membutuhkan Chrome Desktop + Ekstensi "Flow Connector" + CLI: npm install -g flow-connector-cli',
+    'import { spawnSync } from "node:child_process";',
+    'import { existsSync } from "node:fs";',
+    'import { dirname, join } from "node:path";',
+    'import { fileURLToPath } from "node:url";',
+    "",
+    "const __dirname = dirname(fileURLToPath(import.meta.url));",
+    'const IS_WIN = process.platform === "win32";',
+    `const PROJECT_NAME = ${JSON.stringify(project.name)};`,
+    `const DEFAULT_FOLDER = ${JSON.stringify(folderSlug)};`,
+    `const DEFAULT_MODEL = ${JSON.stringify(defaultModel)};`,
+    `const JOBS = ${JSON.stringify(manifest, null, 2)};`,
+    "",
+    "function parseArgs(argv) {",
+    "  const out = { segment: null, model: DEFAULT_MODEL, folder: DEFAULT_FOLDER, waitEach: false };",
+    "  for (let i = 0; i < argv.length; i++) {",
+    "    const a = argv[i];",
+    '    if ((a === "--segment" || a === "-s") && argv[i + 1]) {',
+    "      out.segment = Number(argv[++i]);",
+    '    } else if ((a === "--model" || a === "-m") && argv[i + 1]) {',
+    "      out.model = argv[++i];",
+    '    } else if ((a === "--folder" || a === "-f") && argv[i + 1]) {',
+    "      out.folder = argv[++i];",
+    '    } else if (a === "--wait-each") {',
+    "      out.waitEach = true;",
+    "    }",
+    "  }",
+    "  return out;",
+    "}",
+    "",
+    "function runFlowAuto(args, stdinText) {",
+    '  return spawnSync("flow-auto", args, {',
+    "    cwd: __dirname,",
+    "    input: stdinText,",
+    '    encoding: "utf8",',
+    "    shell: IS_WIN,",
+    "  });",
+    "}",
+    "",
+    "function sleep(ms) {",
+    "  return new Promise((resolve) => setTimeout(resolve, ms));",
+    "}",
+    "",
+    "async function main() {",
+    "  const opts = parseArgs(process.argv.slice(2));",
+    '  console.log("\\n=== nmcGen x Flow Connector Runner ===");',
+    '  console.log("Proyek :", PROJECT_NAME);',
+    '  console.log("Model  :", opts.model);',
+    '  console.log("Folder : Downloads/" + opts.folder + "/");',
+    "",
+    '  const ver = runFlowAuto(["--version"]);',
+    "  if (ver.error || ver.status !== 0) {",
+    '    console.error("\\n[!] CLI \'flow-auto\' belum terpasang di komputer ini.");',
+    '    console.error("    Jalankan sekali di terminal: npm install -g flow-connector-cli");',
+    '    console.error("    Lalu pasang ekstensi Chrome: Flow Connector (srijan-kaiwart/flow-connector)");',
+    "    process.exit(1);",
+    "  }",
+    '  console.log("CLI    :", (ver.stdout || "").trim());',
+    "",
+    '  const st = runFlowAuto(["status", "--site", "flow"]);',
+    '  if (st.stdout) console.log("\\nStatus Flow Connector:\\n" + st.stdout.trim());',
+    "  if (st.stderr) console.error(st.stderr.trim());",
+    '  console.log("\\n[Tips] Pastikan tab https://flow.google.com terbuka & terlihat di Chrome Desktop (jangan diminimize).");',
+    '  console.log("[Tips] Aktifkan \'Pantau Downloads\' di nmcGen agar MP4 hasil render otomatis menempel ke segmen!\\n");',
+    "",
+    "  const selected = opts.segment ? JOBS.filter((j) => j.index === opts.segment) : JOBS;",
+    "  if (selected.length === 0) {",
+    '    console.error("Segmen/klip tidak ditemukan. Total klip tersedia:", JOBS.length);',
+    "    process.exit(1);",
+    "  }",
+    "",
+    "  const shouldWaitPerJob = selected.length === 1 || opts.waitEach;",
+    "  const submitted = [];",
+    "",
+    "  for (const job of selected) {",
+    "    for (const imgPath of job.images) {",
+    "      if (!existsSync(join(__dirname, imgPath))) {",
+    '        console.error("[!] File keyframe tidak ditemukan: " + imgPath + " (pastikan ekstrak seluruh isi ZIP).");',
+    "        process.exit(1);",
+    "      }",
+    "    }",
+    "",
+    '    const args = ["generate", "create", job.mode];',
+    "    for (const imgPath of job.images) {",
+    '      args.push("--image", imgPath);',
+    "    }",
+    '    args.push("--model", opts.model);',
+    '    args.push("--aspect-ratio", job.aspectRatio);',
+    '    if (opts.model === "omni-flash") {',
+    '      args.push("--duration", String(job.durationSec));',
+    "    }",
+    '    args.push("--resolution", job.resolution);',
+    '    args.push("--index", String(job.index));',
+    '    args.push("--folder", opts.folder);',
+    "    if (shouldWaitPerJob) {",
+    '      args.push("--wait", "--wait-timeout", "15");',
+    "    }",
+    "",
+    '    console.log("[" + job.index + "/" + JOBS.length + "] Mengirim: " + job.label + " (" + job.images.length + " frame)...");',
+    "    const res = runFlowAuto(args, job.prompt);",
+    '    if (res.stdout && res.stdout.trim()) console.log("  ->", res.stdout.trim());',
+    '    if (res.stderr && res.stderr.trim()) console.error("  [info]", res.stderr.trim());',
+    "    if (res.status !== 0) {",
+    '      console.error("  [!] Gagal mengirim Klip " + job.index + ". Lanjut ke klip berikutnya...");',
+    "    } else {",
+    "      submitted.push(job.index);",
+    "    }",
+    "  }",
+    "",
+    "  if (shouldWaitPerJob) {",
+    '    console.log("\\nSelesai! Cek hasil MP4 di folder Downloads/" + opts.folder + "/");',
+    "    return;",
+    "  }",
+    "",
+    '  console.log("\\n" + submitted.length + " klip sudah masuk antrean Flow Connector! Memantau progres sampai selesai...");',
+    '  console.log("(Tekan Ctrl+C untuk menutup log saja; antrean tetap jalan di Chrome, atau jalankan \'flow-auto stop --site flow\'.)\\n");',
+    "",
+    "  for (;;) {",
+    "    await sleep(10000);",
+    '    const list = runFlowAuto(["generate", "list"]);',
+    '    const out = (list.stdout || "").trim();',
+    "    const activeLines = out",
+    "      .split(/\\r?\\n/)",
+    "      .filter((ln) => /\\b(queued|running|downloading|waiting_for_extension)\\b/i.test(ln));",
+    "    if (activeLines.length === 0) {",
+    '      console.log("\\nSemua antrean Flow Connector selesai!");',
+    "      break;",
+    "    }",
+    '    console.log("[" + new Date().toLocaleTimeString() + "] Masih memproses " + activeLines.length + " klip di Google Flow...");',
+    "  }",
+    "",
+    '  const failed = runFlowAuto(["generate", "list", "--failed", "--run", opts.folder]);',
+    "  if (failed.stdout && failed.stdout.trim()) {",
+    '    console.log("\\nRingkasan klip gagal (jika ada):\\n" + failed.stdout.trim());',
+    "  }",
+    '  console.log("\\nSelesai! Hasil MP4 tersimpan di Downloads/" + opts.folder + "/");',
+    '  console.log("Buka kembali tab nmcGen (dengan \'Pantau Downloads\' aktif) untuk melihat semua video terpasang otomatis.");',
+    "}",
+    "",
+    "main().catch((err) => {",
+    '  console.error("Error:", err);',
+    "  process.exit(1);",
+    "});",
+    "",
+  ].join("\n");
+}
+
+export function buildFlowConnectorBatWrapper(): string {
+  return '@echo off\r\nchcp 65001 >nul\r\ncd /d "%~dp0"\r\nnode run_flow_connector.mjs %*\r\necho.\r\npause\r\n';
+}
+
+export function buildFlowConnectorCommandWrapper(): string {
+  return '#!/bin/bash\ncd "$(dirname "$0")"\nnode ./run_flow_connector.mjs "$@"\necho ""\nread -p "Tekan Enter untuk menutup..." _\n';
+}
+
+/**
+ * Packages the full Antigravity / Gemini / Flow Connector / Omni 1.2 Flash animation kit into a zero-dependency ZIP.
+ */
+export function buildOmniAnimationPackZip(
+  project: NmcProject,
+  plans: OmniClipPlan[],
+  options?: { flowModel?: FlowConnectorVideoModel },
+): Uint8Array {
+  const sb = ensureStoryboard(project);
+  const flowModel: FlowConnectorVideoModel = options?.flowModel ?? "omni-flash";
   const entries: ZipEntryInput[] = [
+    { name: "run_flow_connector.mjs", data: buildFlowConnectorRunnerScript(project, plans, { model: flowModel }) },
+    { name: "run_flow_connector.bat", data: buildFlowConnectorBatWrapper() },
+    { name: "run_flow_connector.command", data: buildFlowConnectorCommandWrapper() },
+    { name: "FLOW_CONNECTOR_PROMPT.md", data: buildFlowConnectorAgentPrompt(project, plans, { model: flowModel }) },
     { name: "ANTIGRAVITY_ANIMATE_PROMPT.md", data: buildAntigravityGeminiHandoff(project, plans) },
     { name: "OMNI_1.2_PROMPTS.md", data: buildOmniPromptsMarkdown(project, plans) },
     { name: "omni_batch_jobs.json", data: buildOmniBatchJobsJson(project, plans) },
