@@ -138,7 +138,7 @@ export function buildFlowPanelPrompt(
       return `Reference image ${idx + 1} shows ${catEn} "${a.name}"${desc}`;
     });
     parts.push(
-      `Match exact likeness, wardrobe, colors, and lighting from attached reference images: ${refNotes.join("; ")}.`,
+      `Match exact likeness, natural consistent body proportions, wardrobe, colors, and time-of-day lighting from attached reference images while composing a fresh camera angle and pose for this shot: ${refNotes.join("; ")}.`,
     );
   }
 

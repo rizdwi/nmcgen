@@ -420,6 +420,7 @@ export default function StoryboardStep({
       const built = buildNextFramePrompt({
         projectName: project.name,
         scriptText: curSb.scriptText,
+        storySpine: curSb.storySpine,
         visualStyle: curSb.visualStyle,
         aspectRatio: curSb.aspectRatio,
         approvedAssets,
@@ -815,6 +816,7 @@ export default function StoryboardStep({
           const built = buildNextFramePrompt({
             projectName: project.name,
             scriptText: curSb.scriptText,
+            storySpine: curSb.storySpine,
             visualStyle: curSb.visualStyle,
             aspectRatio: curSb.aspectRatio,
             approvedAssets,

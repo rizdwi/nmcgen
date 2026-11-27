@@ -41,6 +41,7 @@ import {
 import { mergeProjects, projectToSupabaseRow, packProjectForCloud, unpackProjectFromCloud } from "./supabaseSync.ts";
 import {
   assetAspectFor,
+  auditStoryCoherence,
   buildAssetImagePrompt,
   buildExtractAssetsFromScriptPrompt,
   buildGenerateScriptPrompt,
@@ -52,6 +53,7 @@ import {
   composeStoryboardFramePrompt,
   createStoryboardProject,
   ensureStoryboard,
+  extractStorySpineFromScript,
   formatSegmentsToScript,
   getSegmentFrames,
   getStoryboardSegments,
@@ -60,6 +62,7 @@ import {
   parseQuickEditResponse,
   parseScriptIntoSegments,
   reindexStoryboardFrames,
+  selectFrameReferences,
   trimCandidates,
 } from "./storyboard.ts";
 import {
@@ -981,5 +984,108 @@ assert.ok(ANIMATIC_ATMOSPHERES.some((a) => a.value === "rain"));
 assert.ok(ANIMATIC_ATMOSPHERES.some((a) => a.value === "golden"));
 assert.ok(ANIMATIC_SCORES.some((s) => s.value === "rain_piano"));
 assert.ok(ANIMATIC_SCORES.some((s) => s.value === "morning_warm"));
+
+// 19. Unified Story Spine (Benang Merah), Coherence Audit & Anti-Ghosting / Anti-Shot-Lock Engine
+const spineScript = [
+  "BENANG MERAH: Kael mencari adiknya yang tersesat di jalur hujan, menemukan suar api petunjuk, lalu menyelamatkannya di pondok puncak.",
+  "",
+  "SEGMEN 1 — Misi di Tengah Badai | EXT. JALUR HUTAN - MALAM",
+  'Kael memeluk ransel obat sambil memanggil adiknya, "Reno, tunggu aku!"',
+  "",
+  "SEGMEN 2 — Jejak Lentera | EXT. TEBING BASAH - MALAM",
+  'Kael menemukan syal merah dan jejak suar hangat. "Dia masih di depan, belum jauh."',
+  "",
+  "SEGMEN 3 — Api Penunjuk | EXT. BATU DATAR HUTAN - MALAM",
+  'Kael menyalakan suar balasan dari api yang tidak padam itu. "Kalau kau lihat cahaya ini, balas aku!"',
+  "",
+  "SEGMEN 4 — Akhirnya Bertemu | INT. PONDOK KAYU - MALAM",
+  'Reno membuka pintu pondok sambil menangis lega. "Kak Kael! Aku tahu kau pasti datang."',
+].join("\n");
+
+const extractedSpine = extractStorySpineFromScript(spineScript);
+assert.ok(extractedSpine.storySpine.includes("Kael mencari adiknya"));
+assert.equal(extractedSpine.cleanScript.startsWith("SEGMEN 1"), true);
+
+const spineSegs = parseScriptIntoSegments(spineScript, [], 5);
+assert.equal(spineSegs.length, 4, "BENANG MERAH preamble must never create a ghost Segment 0");
+assert.equal(spineSegs[0].title, "Misi di Tengah Badai");
+
+const goodAudit = auditStoryCoherence({
+  scriptText: extractedSpine.cleanScript,
+  segments: spineSegs,
+  storySpine: extractedSpine.storySpine,
+  frames: [],
+});
+assert.equal(goodAudit.ok, true, "Well-structured 4-segment story with spine & dialogue must pass audit");
+
+// Regression: shot-list-only nearly silent script (like original Fire on the Rain Trail) must be flagged!
+const weakShotListScript = [
+  "SEGMEN 1 — Jalan Hujan | EXT. HUTAN - MALAM",
+  "1. Wide shot hujan deras. 2. Close-up lumpur. 3. Kamera fokus pada sepatu bot.",
+  "",
+  "SEGMEN 2 — Melihat Api | EXT. BATU - MALAM",
+  'Kamera memperlihatkan api. "Bagaimana mungkin..."',
+].join("\n");
+const weakAudit = auditStoryCoherence({
+  scriptText: weakShotListScript,
+  segments: parseScriptIntoSegments(weakShotListScript, [], 5),
+  storySpine: "",
+  frames: [],
+});
+assert.equal(weakAudit.ok, false, "Fragmented shot-list script without spine or dialogue must raise audit warnings");
+assert.ok(weakAudit.warnings.length >= 3);
+
+// Cross-segment continuity in buildNextFramePrompt injects storySpine & previous segment's closing beat
+const seg2OpenPrompt = buildNextFramePrompt({
+  projectName: "Jejak Api di Hujan",
+  scriptText: extractedSpine.cleanScript,
+  storySpine: extractedSpine.storySpine,
+  visualStyle: VISUAL_STYLE_PRESETS[1].prompt,
+  aspectRatio: "16:9",
+  approvedAssets: accAssets,
+  previousFrames: [segP1.frame, segP2.frame],
+  activeSegment: seg2Target,
+  segmentFrames: [],
+  totalSegments: 2,
+});
+assert.ok(seg2OpenPrompt.prompt.includes("BENANG MERAH CERITA UTUH"));
+assert.ok(seg2OpenPrompt.prompt.includes("AKHIR SEGMEN SEBELUMNYA"));
+assert.ok(seg2OpenPrompt.prompt.includes("WAJIB isi field `dialogue`"));
+
+// Anti-Ghosting regression: if previous frame had a character, a characterless POV/scenery shot MUST NOT inherit previousFrame!
+const povFrameNoChar = {
+  ...parsedF2.frame,
+  id: "pov-no-char",
+  shotSize: "WS" as const,
+  assetIds: [accAssets[1].id, accAssets[2].id], // Location + Prop ONLY (no character Dimas!)
+  sameLocationAsPrev: true,
+};
+const povRefs = selectFrameReferences(povFrameNoChar, accAssets, parsedF1.frame);
+assert.equal(
+  povRefs.some((r) => r.kind === "previous-frame"),
+  false,
+  "Characterless POV/scenery frame must skip previousFrame to prevent FLUX.2 character ghosting",
+);
+
+// Anti-Shot-Scale-Lock regression: WS -> CU jump MUST NOT attach previousFrame so FLUX.2 doesn't clone the wide layout!
+const widePrevFrame = {
+  ...parsedF1.frame,
+  shotSize: "WS" as const,
+};
+const tightNextFrame = {
+  ...parsedF2.frame,
+  id: "tight-cu",
+  shotSize: "CU" as const,
+  sameLocationAsPrev: true,
+};
+const tightRefs = selectFrameReferences(tightNextFrame, accAssets, widePrevFrame);
+assert.equal(
+  tightRefs.some((r) => r.kind === "previous-frame"),
+  false,
+  "Extreme WS -> CU shot jump must skip previousFrame to prevent FLUX.2 composition cloning",
+);
+
+// When previousFrame IS safe to use (MS -> MS same character), prompt explicitly warns against cloning pose/layout
+assert.ok(composedF2.prompt.includes("never copy its layout or pose"));
 
 console.log("nmcGen pipeline tests: all passed");

@@ -270,38 +270,149 @@ export function clampTargetPanels(n: number | undefined): number {
   return Math.max(4, Math.min(7, v));
 }
 
+const SEGMENT_HEADING_RE =
+  /^(?:#{1,3}\s*)?(?:\*\*)?(?:SEGMEN|SEGMENT|ADEGAN|SCENE|BABAK)\s*(\d+)\s*(?:[—\-–:]\s*(.*))?(?:\*\*)?$/i;
+
+const STORY_SPINE_LINE_RE =
+  /^(?:#{1,3}\s*)?(?:\*\*)?(?:BENANG\s*MERAH|PREMIS(?:\s*UTUH)?|LOGLINE|RINGKASAN\s*CERITA|STORY\s*SPINE)(?:\*\*)?\s*:\s*(.*)$/i;
+
+/**
+ * Extracts an optional `BENANG MERAH: ...` header block placed before `SEGMEN 1`
+ * so the unified story spine is stored cleanly without polluting Segment 1.
+ */
+export function extractStorySpineFromScript(rawScript: string): {
+  storySpine: string;
+  cleanScript: string;
+} {
+  const raw = rawScript.replace(/\r\n?/g, "\n").trim();
+  if (!raw) return { storySpine: "", cleanScript: "" };
+
+  const lines = raw.split("\n");
+  const firstHeadingIdx = lines.findIndex((ln) => SEGMENT_HEADING_RE.test(ln.trim()));
+  const searchEnd = firstHeadingIdx === -1 ? Math.min(lines.length, 8) : firstHeadingIdx;
+
+  const spineLines: string[] = [];
+  let capturing = false;
+  let capturedEndIdx = -1;
+
+  for (let i = 0; i < searchEnd; i++) {
+    const trimmed = lines[i].trim();
+    const m = trimmed.match(STORY_SPINE_LINE_RE);
+    if (m) {
+      capturing = true;
+      const tail = (m[1] || "").replace(/^\*+|\*+$/g, "").trim();
+      if (tail) spineLines.push(tail);
+      capturedEndIdx = i;
+      continue;
+    }
+    if (capturing) {
+      if (!trimmed) {
+        capturedEndIdx = i;
+        break;
+      }
+      spineLines.push(trimmed.replace(/^\*+|\*+$/g, "").trim());
+      capturedEndIdx = i;
+    }
+  }
+
+  const storySpine = spineLines.join(" ").replace(/\s+/g, " ").trim();
+  if (!storySpine) {
+    return { storySpine: "", cleanScript: raw };
+  }
+
+  const remaining =
+    firstHeadingIdx !== -1
+      ? lines.slice(firstHeadingIdx).join("\n").trim()
+      : lines.slice(capturedEndIdx + 1).join("\n").trim();
+
+  return { storySpine, cleanScript: remaining || raw };
+}
+
+export interface StoryCoherenceAudit {
+  ok: boolean;
+  warnings: string[];
+}
+
+/**
+ * Deterministic check to catch fragmented, aimless, or shot-list-only scripts before generating assets/panels.
+ */
+export function auditStoryCoherence(
+  sb: Pick<StoryboardData, "scriptText" | "segments" | "storySpine" | "frames">,
+): StoryCoherenceAudit {
+  const warnings: string[] = [];
+  const text = (sb.scriptText || "").trim();
+  if (!text) return { ok: true, warnings: [] };
+
+  const segs = sb.segments && sb.segments.length > 0 ? sb.segments : parseScriptIntoSegments(text, [], 5);
+  const { storySpine: inlineSpine } = extractStorySpineFromScript(text);
+  const hasSpine = Boolean((sb.storySpine || inlineSpine).trim());
+
+  if (!hasSpine) {
+    warnings.push(
+      "Benang Merah cerita belum terkunci. Isi ringkasan 1 kalimat (Tokoh & Tujuan → Konflik → Akhir) atau klik Perkuat Benang Merah.",
+    );
+  }
+  if (segs.length < 3) {
+    warnings.push(
+      `Baru ada ${segs.length} segmen — minimal 3–4 segmen (Setup → Konflik → Titik Balik → Resolusi) agar alur cerita terasa utuh.`,
+    );
+  }
+
+  // Detect camera-shot-list scripts ("1. Wide shot... 2. Close-up...") which lack narrative substance
+  const shotListHits = text.match(/\b(wide\s+shot|close[\s-]?up|medium\s+shot|kamera\s+fokus|kamera\s+memperlihatkan)\b/gi) ?? [];
+  if (shotListHits.length >= 3) {
+    warnings.push(
+      "Naskah terlalu banyak berisi instruksi kamera teknis ('Wide shot / Close-up') alih-alih alur cerita sebab–akibat.",
+    );
+  }
+
+  // Detect nearly silent scripts lacking dialogue or inner voiceover
+  const quoteMatches = text.match(/["“][^"”\n]{4,}["”]/g) ?? [];
+  if (quoteMatches.length < Math.max(2, Math.floor(segs.length * 0.75))) {
+    warnings.push(
+      "Dialog/narasi terlalu sedikit — penonton berisiko bingung memahami tujuan tokoh dan makna adegan.",
+    );
+  }
+
+  return { ok: warnings.length === 0, warnings };
+}
+
 export function parseScriptIntoSegments(
   scriptText: string,
   existing: StorySegment[] = [],
   defaultPanels = 5,
 ): StorySegment[] {
-  const raw = scriptText.replace(/\r\n?/g, "\n").trim();
+  const { cleanScript } = extractStorySpineFromScript(scriptText);
+  const raw = cleanScript.replace(/\r\n?/g, "\n").trim();
   if (!raw) return [];
 
-  const headingRe =
-    /^(?:#{1,3}\s*)?(?:\*\*)?(?:SEGMEN|SEGMENT|ADEGAN|SCENE|BABAK)\s*(\d+)\s*(?:[—\-–:]\s*(.*))?(?:\*\*)?$/i;
   const lines = raw.split("\n");
+  const hasExplicitHeading = lines.some((ln) => SEGMENT_HEADING_RE.test(ln.trim()));
   const buckets: Array<{ headerRest: string; bodyLines: string[] }> = [];
   let cur: { headerRest: string; bodyLines: string[] } | null = null;
 
   for (const line of lines) {
     const trimmed = line.trim();
-    const m = trimmed.match(headingRe);
+    const m = trimmed.match(SEGMENT_HEADING_RE);
     if (m) {
       if (cur && (cur.bodyLines.join("").trim() || cur.headerRest)) buckets.push(cur);
       const rest = (m[2] || "").replace(/\*+$/g, "").trim();
       cur = { headerRest: rest, bodyLines: [] };
     } else {
-      if (!cur) cur = { headerRest: "", bodyLines: [] };
+      // If explicit SEGMEN/ADEGAN headings exist, ignore any preamble lines before SEGMEN 1
+      if (!cur) {
+        if (hasExplicitHeading) continue;
+        cur = { headerRest: "", bodyLines: [] };
+      }
       cur.bodyLines.push(line);
     }
   }
   if (cur && (cur.bodyLines.join("").trim() || cur.headerRest)) buckets.push(cur);
 
-  // If user pasted plain paragraphs without headings, split by double newline into segments (up to 6).
+  // If user pasted plain paragraphs without headings, split by double newline into segments (up to 8).
   if (buckets.length <= 1) {
     const paras = raw.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
-    if (paras.length >= 2 && !headingRe.test(lines[0]?.trim() || "")) {
+    if (paras.length >= 2 && !SEGMENT_HEADING_RE.test(lines[0]?.trim() || "")) {
       return paras.slice(0, 8).map((p, idx) => {
         const prev = existing[idx];
         const firstSentence = p.split(/[.!?\n]/)[0]?.trim().slice(0, 56) || `Segmen ${idx + 1}`;
@@ -446,21 +557,27 @@ export function buildGenerateScriptPrompt(params: {
 }): { system: string; prompt: string } {
   return {
     system:
-      "Kamu adalah penulis skenario cerita visual berbahasa Indonesia yang tajam, natural, dan disiplin mengikuti ide pengguna. Bagi naskah menjadi beberapa SEGMEN terstruktur dimana tiap segmen memiliki rentetan aksi halus (cukup untuk 4-7 panel storyboard berurutan agar cerita mengalir mulus tanpa lompat-lompat). JANGAN melenceng dari genre atau ide pengguna.",
+      "Kamu adalah penulis skenario cerita visual berbahasa Indonesia kelas film pendek. Tugas utamamu menciptakan SATU KESATUAN CERITA UTUH dengan benang merah sebab–akibat yang sangat jelas (Siapa tokohnya → Apa tujuannya → Apa hambatannya → Apa titik balik & jawaban akhirnya) sehingga penonton langsung paham alurnya dari awal sampai selesai. DILARANG menulis daftar instruksi kamera teknis yang kosong tanpa cerita, dan DILARANG mengakhiri cerita menggantung tanpa resolusi.",
     prompt: [
       `Tulis naskah cerita lengkap berbahasa Indonesia untuk proyek berjudul "${params.projectName}".`,
       `Ide cerita pengguna:\n${params.idea.trim()}`,
       `Gaya visual rencana: ${params.visualStyle}`,
       `Rasio frame: ${params.aspectRatio}`,
       "",
-      "Aturan penulisan naskah:",
-      "1. Ikuti genre, suasana, tokoh, dan premis pengguna apa adanya (JANGAN mengubah cerita ringan/bahagia menjadi horor, dan JANGAN menambahkan tokoh atau benda aneh yang tidak diminta).",
-      "2. Bagi naskah menjadi 3 sampai 4 SEGMEN bernomor dengan format header persis seperti ini:",
-      "   SEGMEN 1 — Judul Singkat Segmen | EXT./INT. LOKASI SPESIFIK - WAKTU",
-      "3. Di dalam SETIAP SEGMEN, tulis rentetan aksi visual langkah-demi-langkah (4 sampai 6 momen kecil berurutan: misal tiba -> menyusuri jalan -> berhenti melihat benda -> reaksi/berinteraksi -> melangkah lanjut) supaya nanti bisa dipecah menjadi 4-7 panel storyboard tanpa terasa melompat.",
-      "4. Saat pertama kali tokoh, lokasi, atau benda penting muncul, sebutkan ciri visual konkretnya secara singkat (umur, pakaian & warna khas, bentuk lokasi/benda) supaya ekstraksi aset konsisten.",
-      "5. Sertakan dialog singkat yang natural bila cocok dengan ceritanya.",
-      "6. Balas langsung dengan teks naskah berformat SEGMEN 1..N tanpa kata pengantar atau penutup.",
+      "Aturan WAJIB Benang Merah & Kesatuan Cerita:",
+      "1. Bila ide pengguna masih singkat (misal 3–8 kata), kembangkan menjadi SATU cerita utuh yang membumi, jelas tujuannya, dan memuaskan — tetap 100% setia pada genre/suasana ide pengguna (JANGAN mengubah cerita hangat/drama menjadi horor/monster yang tidak diminta).",
+      "2. Baris PALING ATAS (sebelum SEGMEN 1) WAJIB menulis 1 kalimat ringkas dengan format persis:",
+      "   BENANG MERAH: [Siapa tokoh utama & misinya] menghadapi [hambatan utama], lalu menemukan [titik balik bermakna] yang berujung pada [resolusi/jawaban jelas di akhir].",
+      "3. Bagi cerita menjadi 4 SEGMEN sebab–akibat yang saling menyambung erat (akhir Segmen N langsung memicu awal Segmen N+1) dengan format header persis:",
+      "   SEGMEN 1 — Judul Singkat | EXT./INT. LOKASI SPESIFIK - WAKTU",
+      "   - SEGMEN 1 (Setup & Misi): Perkenalkan siapa tokohnya, sedang apa, KENAPA ia berada di situ (tujuan/taruhan konkretnya), dan pemicu awal yang menggerakkan cerita.",
+      "   - SEGMEN 2 (Hambatan & Petunjuk): Akibat langsung dari Segmen 1 — tokoh menghadapi rintangan nyata atau menemukan petunjuk penting yang memperjelas misteri/misi.",
+      "   - SEGMEN 3 (Titik Balik & Klimaks): Tokoh mengambil keputusan/aksi penentu dan menemukan inti kebenaran/jawaban atas misinya (bukan sekadar melamun atau melihat benda tanpa arti!).",
+      "   - SEGMEN 4 (Resolusi & Payoff): Akibat nyata dari klimaks; pertanyaan penonton terjawab tuntas, tujuan tokoh tercapai/berubah secara emosional, dan cerita ditutup dengan memuaskan.",
+      "4. Tulis isi setiap segmen dalam 4–5 kalimat narasi aksi visual yang mengalir berurutan (agar mulus dipecah menjadi 4–7 panel storyboard). DILARANG menulis istilah kamera/teknis seperti 'Wide shot', 'Close-up', 'Kamera fokus', atau 'rim lighting' di dalam naskah!",
+      "5. SETIAP SEGMEN WAJIB memiliki minimal 1–2 baris dialog lisan atau monolog batin singkat dalam tanda kutip (\"...\") yang natural dan memberi konteks jelas ke penonton tentang tujuan, perasaan, atau penemuan tokoh.",
+      "6. Saat pertama kali tokoh, lokasi, atau benda penting muncul, sebutkan ciri visual konkretnya (umur, pakaian & warna khas, bentuk benda, waktu/cuaca yang konsisten).",
+      "7. Balas langsung mulai dari baris BENANG MERAH: dilanjutkan SEGMEN 1 sampai SEGMEN 4 tanpa kata pengantar atau penutup.",
     ].join("\n"),
   };
 }
@@ -468,19 +585,25 @@ export function buildGenerateScriptPrompt(params: {
 export function buildReviseScriptPrompt(params: {
   projectName: string;
   idea: string;
+  storySpine?: string;
   currentScript: string;
   instruction: string;
 }): { system: string; prompt: string } {
   return {
     system:
-      "Kamu adalah editor skenario berbahasa Indonesia. Revisi naskah sesuai instruksi pengguna dengan tetap mempertahankan pembagian SEGMEN 1..N (header: 'SEGMEN N — Judul | LOKASI - WAKTU') dan rentetan aksi halus per segmen agar siap dipecah jadi 4-7 panel storyboard.",
+      "Kamu adalah Story Doctor & editor skenario berbahasa Indonesia. Revisi naskah sesuai instruksi pengguna agar memiliki BENANG MERAH yang sangat jelas, alur sebab–akibat yang utuh dari SEGMEN 1 sampai penutup, dialog bermakna di tiap segmen, dan bebas dari istilah teknis kamera.",
     prompt: [
       `Judul proyek: ${params.projectName}`,
       params.idea.trim() ? `Ide awal: ${params.idea.trim()}` : "",
+      params.storySpine?.trim() ? `Benang merah saat ini: ${params.storySpine.trim()}` : "",
       `Instruksi revisi dari pengguna:\n${params.instruction.trim()}`,
       `Naskah saat ini:\n${params.currentScript.trim()}`,
       "",
-      "Pertahankan struktur header SEGMEN 1 — Judul | LOKASI - WAKTU dan balas langsung dengan naskah lengkap hasil revisi tanpa kata pengantar.",
+      "Aturan revisi:",
+      "1. Awali baris pertama dengan `BENANG MERAH: ...` (1 kalimat utuh: Tokoh & Tujuan → Hambatan → Titik Balik → Resolusi).",
+      "2. Gunakan struktur 3–4 segmen sebab–akibat dengan header persis `SEGMEN N — Judul | EXT./INT. LOKASI - WAKTU`, di mana akhir tiap segmen langsung menyambung ke segmen berikutnya.",
+      "3. Hapus istilah teknis kamera ('Wide shot', 'Close-up', 'Kamera fokus') dan ganti dengan aksi cerita konkret + 1–2 dialog/monolog batin bermakna dalam tanda kutip di setiap segmen.",
+      "4. Balas langsung mulai dari `BENANG MERAH:` lalu `SEGMEN 1..N` tanpa kata pengantar.",
     ]
       .filter(Boolean)
       .join("\n\n"),
@@ -498,18 +621,19 @@ export function buildExtractAssetsFromScriptPrompt(params: {
 }): { system: string; prompt: string } {
   return {
     system:
-      "Kamu adalah Art Director & Continuity Supervisor. Tugasmu mengekstrak daftar lengkap Karakter, Lokasi, dan Properti penting LANGSUNG dari naskah. DILARANG mengarang tokoh, lokasi, atau benda yang tidak ada di naskah. Balas HANYA JSON array valid tanpa markdown.",
+      "Kamu adalah Art Director & Continuity Supervisor. Tugasmu mengekstrak daftar lengkap Karakter, Lokasi, dan Properti penting LANGSUNG dari naskah dengan pencahayaan/waktu yang 100% konsisten dan pemisahan tegas antara lokasi kosong dan properti kunci. DILARANG mengarang tokoh, lokasi, atau benda yang tidak ada di naskah. Balas HANYA JSON array valid tanpa markdown.",
     prompt: [
       `Baca keseluruhan naskah "${params.projectName}" berikut secara teliti, lalu ekstrak SEMUA aset visual yang benar-benar dibutuhkan untuk menggambar seluruh naskah ini.`,
       "",
-      'Format JSON array wajib: [{"name":"Nama Jelas","category":"character|location|prop","roleInScript":"Penjelasan singkat bahasa Indonesia + muncul di adegan mana sesuai naskah","visualDesc":"Concise pure English visual description strictly matching every physical/clothing/architectural detail stated in the script"}]',
+      'Format JSON array wajib: [{"name":"Nama Jelas","category":"character|location|prop","roleInScript":"Penjelasan singkat bahasa Indonesia + muncul di adegan mana sesuai naskah","visualDesc":"Concise pure English visual description strictly matching every physical/clothing/architectural/time-of-day detail stated in the script"}]',
       "",
-      "Aturan KETAT anti-melenceng:",
+      "Aturan KETAT anti-melenceng & anti-bentrok visual:",
       "1. HANYA ekstrak karakter, lokasi, dan properti kunci yang FISIKNYA MUNCUL di naskah. DILARANG menambah karakter/monster/lokasi baru yang tidak tertulis di naskah!",
-      "2. Ikuti detail naskah secara persis: umur, gender, etnis/latar budaya, rambut, warna & jenis pakaian, arsitektur ruangan, dan warna/bentuk properti. Jika naskah tidak menyebut detail kecil (misal warna celana), pilih detail paling wajar sesuai konteks naskah agar konsisten.",
-      "3. Field roleInScript WAJIB bahasa Indonesia dan menyebutkan muncul di adegan mana (misal: 'Tokoh utama (Adegan 1-4): barista muda yang ramah...').",
-      "4. Field visualDesc WAJIB bahasa Inggris murni (25-55 kata), HANYA mendeskripsikan ciri fisik tetap (wajah, rambut, pakaian untuk character; bentuk & elemen ruang untuk location; bentuk & bahan benda untuk prop). JANGAN tulis nama gaya seni, JANGAN tulis sudut kamera, JANGAN tulis dialog, JANGAN tulis simbol @.",
-      "5. Jumlah aset ideal: semua karakter utama/pendukung yang tampil + lokasi utama yang tampil + maksimal 1-2 properti paling krusial jika memang penting di naskah (total biasanya 3 sampai 7 aset).",
+      "2. Ikuti detail naskah secara persis: umur, gender, etnis/latar budaya, rambut, warna & jenis pakaian, arsitektur ruangan, dan warna/bentuk properti. Untuk karakter, pastikan proporsi tubuh normal & ciri wajah/rambut/pakaian jelas dan konsisten.",
+      "3. KHUSUS ASET LOKASI (`location`): WAJIB menyertakan waktu hari & cuaca persis sesuai naskah (misal: night heavy rain, dawn mist, warm sunset — JANGAN menggambar lokasi siang terang jika adegannya malam!). DAN DILARANG memasukkan properti kunci bergerak/api/benda yang sudah dibuatkan kartu `prop` terpisah agar warna & bentuk tidak bentrok!",
+      "4. Field roleInScript WAJIB bahasa Indonesia dan menyebutkan muncul di segmen/adegan mana (misal: 'Tokoh utama (Segmen 1-4): pendaki muda yang mencari adiknya...').",
+      "5. Field visualDesc WAJIB bahasa Inggris murni (25-55 kata), HANYA mendeskripsikan ciri fisik tetap (wajah, rambut, pakaian untuk character; bentuk ruang, waktu hari & cuaca untuk location; bentuk, bahan & warna tepat untuk prop). JANGAN tulis nama gaya seni, JANGAN tulis sudut kamera, JANGAN tulis dialog, JANGAN tulis simbol @.",
+      "6. Jumlah aset ideal: semua karakter utama/pendukung yang tampil + lokasi utama yang tampil + maksimal 1-2 properti paling krusial jika memang penting di naskah (total biasanya 3 sampai 7 aset).",
       "",
       `Gaya visual proyek (untuk konteks saja, tidak perlu ditulis ulang di visualDesc): ${params.visualStyle}`,
       "",
@@ -569,12 +693,12 @@ export function buildAssetImagePrompt(asset: Pick<StoryAsset, "name" | "category
   const desc = cleanPromptSnippet(asset.visualDesc || asset.name);
 
   if (asset.category === "character") {
-    return `${style}. Clean character reference portrait of one single subject standing naturally, three-quarter to full body view, clear face looking toward camera, centered on a plain solid neutral light-grey studio background. Subject: ${desc}. Exact outfit and features, single character only, no split panels, no multiple angles, no cropped head, no text, no watermark.`;
+    return `${style}. Clean character reference sheet portrait of one single person standing upright with natural well-proportioned body anatomy, three-quarter to full body view, clear face looking toward camera, centered on a plain solid neutral light-grey studio background. Subject: ${desc}. Exact outfit, hairstyle, and features, single character only, no split panels, no multiple angles, no cropped head, no text, no watermark.`;
   }
   if (asset.category === "location") {
-    return `${style}. Wide establishing background illustration of an empty location with NO people, NO characters, NO silhouettes. Setting: ${desc}. Clear foreground, midground, and background depth, consistent lighting and atmosphere, single clean frame, no text, no watermark.`;
+    return `${style}. Wide establishing background illustration of an empty location with NO people, NO characters, NO silhouettes, and NO temporary movable props. Setting: ${desc}. Strictly match the exact time of day, weather, and lighting atmosphere described, clear foreground, midground, and background depth, single clean frame, no text, no watermark.`;
   }
-  return `${style}. Single isolated object reference centered on a plain neutral grey background, no hands, no people. Object: ${desc}. Crisp clear details, single item only, no split grid, no text, no watermark.`;
+  return `${style}. Single isolated object reference centered on a plain neutral grey background, no hands, no people. Object: ${desc}. Crisp clear details and exact colors, single item only, no split grid, no text, no watermark.`;
 }
 
 // ============================================================================
@@ -584,6 +708,7 @@ export function buildAssetImagePrompt(asset: Pick<StoryAsset, "name" | "category
 export function buildNextFramePrompt(params: {
   projectName: string;
   scriptText: string;
+  storySpine?: string;
   visualStyle: string;
   aspectRatio: AspectRatio;
   approvedAssets: StoryAsset[];
@@ -598,6 +723,9 @@ export function buildNextFramePrompt(params: {
   const targetPanels = clampTargetPanels(seg?.targetPanels ?? 5);
   const panelNum = segFrames.length + 1;
   const globalIndex = params.previousFrames.length + 1;
+  const effectiveSpine = (
+    params.storySpine || extractStorySpineFromScript(params.scriptText).storySpine
+  ).trim();
 
   const assetCatalog = params.approvedAssets
     .map(
@@ -605,6 +733,20 @@ export function buildNextFramePrompt(params: {
         `- id="${a.id}" | nama="${a.name}" | jenis=${a.category} | peran="${a.roleInScript}" | visual="${a.visualDesc}"`,
     )
     .join("\n");
+
+  // Summarize closing beats of previous segments so Segment 2/3/4 bridges cause->effect without jump cuts
+  const earlierSegFrames = seg
+    ? params.previousFrames.filter((f) => f.segmentId && f.segmentId !== seg.id)
+    : [];
+  const prevSegmentsRecap = earlierSegFrames.length
+    ? earlierSegFrames
+        .slice(-3)
+        .map((f) => {
+          const dlg = f.dialogue.trim() ? ` | Dialog: "${f.dialogue.trim()}"` : "";
+          return `- Frame #${f.index} "${f.title}": ${f.sceneSummary}${dlg}`;
+        })
+        .join("\n")
+    : "";
 
   const prevInSegSummary = segFrames.length
     ? segFrames
@@ -626,37 +768,46 @@ export function buildNextFramePrompt(params: {
 
   const pacingGuide = seg
     ? panelNum === 1
-      ? `Panel 1 dari ${targetPanels}: BUKA Segmen ${seg.index} secara tenang (establishing ruang/kedatangan/awal gerakan tokoh). JANGAN langsung melompat ke puncak/akhir segmen!`
+      ? seg.index > 1 && lastGlobal
+        ? `Panel 1 dari ${targetPanels}: BUKA Segmen ${seg.index} dengan MENYAMBUNG LANGSUNG secara sebab–akibat dari akhir segmen sebelumnya ("${lastGlobal.title}"). Tunjukkan pergeseran situasi/aksi baru yang jelas (JANGAN mengulang pose atau ekspresi panel terakhir segmen lalu, dan JANGAN langsung melompat ke akhir segmen!).`
+        : `Panel 1 dari ${targetPanels}: BUKA Segmen ${seg.index} dengan memperkenalkan tokoh, latar, serta konteks/misi cerita secara jelas. JANGAN langsung melompat ke puncak/akhir segmen!`
       : panelNum < targetPanels
-        ? `Panel ${panelNum} dari ${targetPanels}: LANJUTKAN micro-gerakan TEPAT 1 langkah setelah Panel ${panelNum - 1} (misal melangkah masuk -> melihat detail/benda -> reaksi ekspresi -> berinteraksi). JANGAN melompat ke akhir segmen karena masih ada ${targetPanels - panelNum} panel lagi setelah ini!`
-        : `Panel ${panelNum} dari ${targetPanels} (PANEL PENUTUP SEGMEN ${seg.index}): Selesaikan aksi terakhir Segmen ${seg.index} dengan mulus dan jembatani transisi menuju segmen berikutnya.`
+        ? `Panel ${panelNum} dari ${targetPanels}: MAJU 1 LANGKAH SEBAB–AKIBAT yang nyata setelah Panel ${panelNum - 1} ("${lastInSeg?.title ?? ""}") — hadirkan perkembangan aksi, penemuan, atau reaksi emosi baru (DILARANG mengulang pose/komposisi serupa!). JANGAN melompat ke akhir segmen karena masih ada ${targetPanels - panelNum} panel lagi setelah ini!`
+        : `Panel ${panelNum} dari ${targetPanels} (PANEL PENUTUP SEGMEN ${seg.index}): Selesaikan titik penting Segmen ${seg.index} dengan jelas dan berikan jembatan sebab–akibat yang kuat menuju segmen berikutnya (atau penutup resolusi utuh jika ini segmen terakhir).`
     : globalIndex === 1
       ? "Mulailah tepat dari pembukaan cerita sesuai naskah."
-      : `Lanjutkan TEPAT 1 langkah setelah Frame ${globalIndex - 1} tanpa melompat.`;
+      : `Lanjutkan TEPAT 1 langkah sebab–akibat setelah Frame ${globalIndex - 1} tanpa melompat atau mengulang pose.`;
 
   const isLastSegment = seg && params.totalSegments ? seg.index >= params.totalSegments : false;
+  const segDialogueCount = segFrames.filter((f) => Boolean(f.dialogue.trim())).length;
+  const dialogueGuide =
+    segDialogueCount < 2 && (panelNum === 1 || panelNum === Math.ceil(targetPanels / 2) || panelNum >= targetPanels)
+      ? "WAJIB isi field `dialogue` dengan 1 kalimat pendek natural bahasa Indonesia (5–16 kata: dialog lisan tokoh atau monolog batin singkat) yang memperjelas konteks, tujuan, atau reaksi tokoh agar penonton paham benang merah cerita!"
+      : "Isi field `dialogue` dengan dialog lisan / monolog batin singkat jika momen ini penting untuk pemahaman penonton (pastikan minimal 2–3 panel per segmen memiliki dialog/narasi bermakna).";
 
   return {
     system:
-      "Kamu adalah Storyboard Director profesional ala film & komik sinematik. Tugasmu memecah SATU SEGMEN naskah menjadi 4-7 PANEL storyboard berurutan yang mengalir halus langkah-demi-langkah (seperti: tiba -> menyusuri jalan -> berhenti melihat benda -> berinteraksi -> melangkah pergi) agar cerita TIDAK LOMPAT-LOMPAT. Gunakan HANYA aset dari daftar ACC. Balas HANYA 1 JSON object valid tanpa markdown.",
+      "Kamu adalah Storyboard Director & Narrative Continuity Supervisor profesional. Tugasmu memecah SATU SEGMEN naskah menjadi 4-7 PANEL storyboard berurutan yang MENJAGA BENANG MERAH CERITA UTUH secara sebab–akibat — setiap panel wajib memajukan cerita secara visual & emosional (TIDAK lompat-lompat dan TIDAK mengulang pose/aksi statis). Gunakan HANYA aset dari daftar ACC. Balas HANYA 1 JSON object valid tanpa markdown.",
     prompt: [
       seg
         ? `Susun rancangan untuk PANEL ${panelNum} dari ${targetPanels} pada SEGMEN ${seg.index} ("${seg.title}") untuk proyek "${params.projectName}" (${params.aspectRatio}).`
         : `Susun rancangan untuk FRAME ${globalIndex} dari storyboard "${params.projectName}" (${params.aspectRatio}).`,
+      effectiveSpine ? `\nBENANG MERAH CERITA UTUH (WAJIB TERJAGA DI TIAP PANEL):\n${effectiveSpine}` : "",
       "",
-      'Format JSON object wajib: {"title":"judul sangat singkat 2-4 kata untuk label panel (mis. Tiba di Gerbang, Menyusuri Jalan, Membaca Surat)","scriptExcerpt":"bagian singkat naskah segmen yang sedang divisualkan","sceneSummary":"1-2 kalimat bahasa Indonesia tentang SATU micro-momen aksi visual konkret di panel ini","dialogue":"dialog/narasi singkat jika ada di momen ini (kosongkan jika panel visual murni)","shotSize":"WS|MS|MCU|CU|ECU","cameraAngle":"Front|Side 90|Rear 3/4|High|Low","assetIds":["id-aset-acc-yang-fisiknya-tampil"],"sameLocationAsPrev":true,"visualPrompt":"Concise vivid pure English description (45-80 words) of THIS SINGLE PANEL: subject pose, facial expression, specific micro-action, foreground/background environment, and lighting/mood. NO Indonesian words, NO @ symbols, NO dialogue quotes, NO text on image.","segmentFinished":false,"storyFinished":false}',
+      'Format JSON object wajib: {"title":"judul sangat singkat 2-4 kata untuk label panel (mis. Tiba di Gerbang, Menemukan Jejak, Keputusan Berani)","scriptExcerpt":"bagian singkat naskah segmen yang sedang divisualkan","sceneSummary":"1-2 kalimat bahasa Indonesia tentang SATU perkembangan aksi sebab–akibat konkret di panel ini","dialogue":"dialog lisan atau monolog batin singkat bahasa Indonesia yang memperjelas alur cerita ke penonton","shotSize":"WS|MS|MCU|CU|ECU","cameraAngle":"Front|Side 90|Rear 3/4|High|Low","assetIds":["id-aset-acc-yang-fisiknya-tampil"],"sameLocationAsPrev":true,"visualPrompt":"Concise vivid pure English description (50-85 words) of THIS SINGLE PANEL: clear fresh pose, natural body proportions, facial expression, specific story action, exact time-of-day/weather lighting matching the segment, and foreground/background environment. NO Indonesian words, NO @ symbols, NO dialogue quotes, NO text on image.","segmentFinished":false,"storyFinished":false}',
       "",
-      "Aturan KETAT Anti-Lompat:",
-      `1. Pacing Panel: ${pacingGuide}`,
-      "2. SATU panel = SATU micro-momen tunggal yang nyambung langsung dari posisi/pose panel sebelumnya (bukan merangkum seluruh adegan dalam 1 gambar).",
-      "3. Field title WAJIB sangat singkat & jelas (2–4 kata seperti caption papan storyboard: 'Tiba di Pelabuhan', 'Menyusuri Jalan', 'Membaca Surat', 'Bertanya Arah', 'Menuju Fajar').",
-      "4. Field assetIds WAJIB hanya berisi `id` yang persis ada di DAFTAR ASET ACC di bawah, dan HANYA aset yang FISIKNYA TERLIHAT DI KAMERA pada panel ini.",
+      "Aturan KETAT Benang Merah & Anti-Lompat:",
+      `1. Pacing & Sebab–Akibat: ${pacingGuide}`,
+      "2. SATU panel = SATU perkembangan cerita konkret yang nyata berbeda dari panel sebelumnya (DILARANG membuat 2 panel berturut-turut dengan pose/ekspresi/sudut hampir identik seperti sekadar menunduk lalu mendongak tanpa progres cerita!).",
+      `3. Kejelasan bagi Penonton (Dialog/Narasi): ${dialogueGuide}`,
+      "4. Field title WAJIB sangat singkat & jelas (2–4 kata seperti caption papan storyboard: 'Mencari Jejak Adik', 'Menemukan Lentera', 'Menerobos Hujan', 'Akhirnya Bertemu').",
+      "5. Field assetIds WAJIB hanya berisi `id` yang persis ada di DAFTAR ASET ACC di bawah, dan HANYA aset yang BENAR-BENAR TERLIHAT DI KAMERA pada panel ini (jika panel ini pure POV / close-up benda / pemandangan kosong tanpa tokoh, JANGAN masukkan id karakter!).",
       prevRefFrame
-        ? `5. Variasikan framing kamera dari panel sebelumnya (panel sebelumnya memakai ${prevRefFrame.shotSize} / ${prevRefFrame.cameraAngle} — pilih shotSize atau cameraAngle berbeda agar transisi terasa hidup seperti film!).`
-        : "5. Pilih komposisi pembuka yang kuat (biasanya WS atau MS).",
-      `6. Set sameLocationAsPrev = ${panelNum > 1 ? "true (kecuali benar-benar pindah ruangan/tempat di tengah segmen)" : "false jika lokasi segmen ini berbeda dari segmen sebelumnya, atau true jika masih 1 tempat"}.`,
-      `7. Set segmentFinished = ${panelNum >= targetPanels ? "true" : "false"} (true jika panel ini menutup Segmen ${seg?.index ?? 1}). Set storyFinished = ${isLastSegment && panelNum >= targetPanels ? "true" : "false"} (true HANYA jika ini penutup akhir seluruh cerita).`,
-      "8. Field visualPrompt WAJIB 100% bahasa Inggris murni (45-80 kata), konsisten dengan ciri fisik aset ACC yang tampil, TANPA nama gaya seni dan TANPA teks Indonesia / simbol @.",
+        ? `6. Variasikan framing & sudut kamera secara nyata dari panel sebelumnya (panel sebelumnya memakai ${prevRefFrame.shotSize} / ${prevRefFrame.cameraAngle} — pilih kombinasi shotSize & cameraAngle yang segar dan sesuai emosi momen ini!).`
+        : "6. Pilih komposisi pembuka yang kuat (biasanya WS atau MS).",
+      `7. Set sameLocationAsPrev = ${panelNum > 1 ? "true jika masih di lokasi/ruang yang sama dengan panel sebelumnya, atau false jika kamera berpindah ke ruang baru / pure insert POV berbeda" : "false jika lokasi atau suasana segmen ini berganti dari segmen sebelumnya, atau true hanya jika persis di tempat & momen yang sama"}.`,
+      `8. Set segmentFinished = ${panelNum >= targetPanels ? "true" : "false"} (true jika panel ini menutup Segmen ${seg?.index ?? 1}). Set storyFinished = ${isLastSegment && panelNum >= targetPanels ? "true" : "false"} (true HANYA jika ini penutup akhir seluruh cerita).`,
+      `9. Field visualPrompt WAJIB 100% bahasa Inggris murni (50-85 kata), wajib menjaga waktu hari, cuaca, warna pencahayaan (${seg?.locationHint || "sesuai naskah"}), dan proporsi tubuh karakter yang konsisten. TANPA nama gaya seni, TANPA teks Indonesia / simbol @.`,
       params.userDirection?.trim()
         ? `\nARAHAN KHUSUS PENGGUNA UNTUK PANEL ${panelNum} (WAJIB DIIKUTI):\n${params.userDirection.trim()}`
         : "",
@@ -666,6 +817,7 @@ export function buildNextFramePrompt(params: {
       seg
         ? `FOKUS NASKAH SEGMEN ${seg.index} (${seg.title}${seg.locationHint ? ` | ${seg.locationHint}` : ""}):\n${seg.scriptContent}`
         : "",
+      prevSegmentsRecap ? `\nAKHIR SEGMEN SEBELUMNYA (sambungkan sebab–akibat dari sini):\n${prevSegmentsRecap}` : "",
       "",
       `PANEL YANG SUDAH DIBUAT DI SEGMEN INI:\n${prevInSegSummary}`,
       "",
@@ -759,11 +911,18 @@ export interface ResolvedFrameReference {
   dataUrl: string;
 }
 
+function isExtremeShotScaleJump(prevShot: ShotSize, curShot: ShotSize): boolean {
+  const prevTight = prevShot === "CU" || prevShot === "ECU";
+  const curTight = curShot === "CU" || curShot === "ECU";
+  return (prevShot === "WS" && curTight) || (prevTight && curShot === "WS");
+}
+
 /**
  * Selects up to 3 reference images tailored for FLUX.2 Klein 4B:
  * - Priority 1: Visible Characters (up to 2) -> locked face & outfit
  * - Priority 2: Visible Location (for WS/MS) or Prop -> locked setting/object
- * - Priority 3: Previous Frame image (ONLY if sameLocationAsPrev is enabled and a slot remains) -> lighting/color continuity
+ * - Priority 3: Previous Frame image -> ONLY when safe from character ghosting and extreme shot-scale cloning
+ *   (skip if previous frame had characters that are absent in this shot, or across WS <-> CU/ECU jumps!)
  */
 export function selectFrameReferences(
   frame: StoryFrame,
@@ -810,16 +969,23 @@ export function selectFrameReferences(
     }
   }
 
-  // Optional previous-frame visual continuity when still in the same location
+  // Optional previous-frame visual continuity ONLY when safe from FLUX.2 composition cloning & character ghosting
   if (frame.sameLocationAsPrev && previousFrame && refs.length < 3) {
-    const prevUrl = getSelectedFrameImage(previousFrame);
-    if (prevUrl) {
-      refs.push({
-        kind: "previous-frame",
-        label: `Frame ${previousFrame.index}`,
-        roleDesc: `the previous shot's lighting, color palette, and set continuity`,
-        dataUrl: prevUrl,
-      });
+    const prevHasChar = previousFrame.assetIds.some((id) => assetMap.get(id)?.category === "character");
+    const curHasChar = selectedAssets.some((a) => a.category === "character");
+    const ghostingRisk = prevHasChar && !curHasChar;
+    const shotJumpRisk = isExtremeShotScaleJump(previousFrame.shotSize, frame.shotSize);
+
+    if (!ghostingRisk && !shotJumpRisk) {
+      const prevUrl = getSelectedFrameImage(previousFrame);
+      if (prevUrl) {
+        refs.push({
+          kind: "previous-frame",
+          label: `Frame ${previousFrame.index}`,
+          roleDesc: `the previous shot's lighting, color palette, and set continuity`,
+          dataUrl: prevUrl,
+        });
+      }
     }
   }
 
@@ -849,8 +1015,13 @@ export function composeStoryboardFramePrompt(
   if (refs.length > 0) {
     // Official Cloudflare FLUX.2 indexing is 0-based: image 0, image 1, image 2!
     const refClauses = refs.map((r, idx) => `image ${idx} shows ${r.roleDesc}`);
+    const hasPrevRef = refs.some((r) => r.kind === "previous-frame");
     parts.push(
-      `Reference alignment: ${refClauses.join("; ")}. Keep the exact face, hair, age, and clothing of any referenced character while composing this new shot angle naturally inside the scene.`,
+      `Reference alignment: ${refClauses.join("; ")}. Keep the exact face, hair, age, natural body proportions, and clothing of any referenced character while composing a fresh camera angle and pose matching this shot.${
+        hasPrevRef
+          ? " Use the previous shot reference ONLY for lighting, color palette, and environment continuity—never copy its layout or pose."
+          : ""
+      }`,
     );
   } else if (frame.assetIds.length > 0) {
     const fallbackDescs = frame.assetIds
@@ -969,6 +1140,7 @@ export function buildStoryboardMarkdown(project: NmcProject): string {
     "",
     "## 1. Ide Cerita",
     sb.idea || "(Belum diisi)",
+    ...(sb.storySpine?.trim() ? ["", "### Benang Merah Cerita", sb.storySpine.trim()] : []),
     "",
     "## 2. Naskah Per-Segmen",
     sb.scriptText || formatSegmentsToScript(segments) || "(Belum diisi)",

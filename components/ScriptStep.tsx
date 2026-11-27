@@ -4,9 +4,11 @@ import type { AspectRatio, ProviderProfile, StoryboardData, StorySegment } from 
 import { matchVisualStylePreset, uid, VISUAL_STYLE_PRESETS } from "@/lib/presets";
 import { callAi } from "@/lib/storage";
 import {
+  auditStoryCoherence,
   buildGenerateScriptPrompt,
   buildReviseScriptPrompt,
   clampTargetPanels,
+  extractStorySpineFromScript,
   formatSegmentsToScript,
   parseScriptIntoSegments,
 } from "@/lib/storyboard";
@@ -29,6 +31,9 @@ interface ScriptStepProps {
 }
 
 const PANEL_COUNT_OPTIONS = [4, 5, 6, 7] as const;
+
+const STRENGTHEN_SPINE_INSTRUCTION =
+  "Perkuat benang merah cerita agar menjadi 1 kesatuan cerita utuh 4 babak (Setup & tujuan tokoh jelas → Hambatan/petunjuk → Titik balik bermakna → Resolusi/jawaban akhir yang memuaskan). Hilangkan daftar instruksi kamera teknis ('Wide shot/Close-up') dan tambahkan dialog lisan atau monolog batin singkat yang natural di setiap segmen agar penonton langsung paham alurnya.";
 
 export default function ScriptStep({
   projectName,
@@ -66,6 +71,10 @@ export default function ScriptStep({
   const selectedPreset = VISUAL_STYLE_PRESETS.find((p) => p.id === selectedPresetId);
   const wordCount = sb.scriptText.trim() ? sb.scriptText.trim().split(/\s+/).length : 0;
   const totalTargetPanels = segments.reduce((sum, s) => sum + clampTargetPanels(s.targetPanels), 0);
+  const coherence = useMemo(
+    () => auditStoryCoherence({ scriptText: sb.scriptText, segments, storySpine: sb.storySpine, frames: sb.frames }),
+    [sb.scriptText, segments, sb.storySpine, sb.frames],
+  );
 
   const commitSegments = (nextList: StorySegment[]) => {
     const normalized = nextList.map((s, idx) => ({
@@ -105,9 +114,11 @@ export default function ScriptStep({
   };
 
   const handleRawScriptChange = (value: string) => {
-    const parsed = parseScriptIntoSegments(value, segments, 5);
+    const { storySpine: parsedSpine, cleanScript } = extractStorySpineFromScript(value);
+    const parsed = parseScriptIntoSegments(cleanScript, segments, 5);
     onPatchSb({
       scriptText: value,
+      ...(parsedSpine ? { storySpine: parsedSpine } : {}),
       segments: parsed,
       scriptApproved: false,
     });
@@ -119,7 +130,7 @@ export default function ScriptStep({
       setError("Tulis ide cerita terlebih dahulu sebelum generate naskah.");
       return;
     }
-    setBusy("Menyusun naskah terbagi per segmen dari ide cerita...");
+    setBusy("Menyusun benang merah & naskah 4 babak sebab–akibat dari ide cerita...");
     setError("");
     setNotice("");
     try {
@@ -135,16 +146,17 @@ export default function ScriptStep({
         setError(res.error || "AI gagal membuat naskah. Periksa koneksi Cloudflare Workers AI / Pengaturan.");
         return;
       }
-      const nextText = res.text.trim();
-      const parsedSegs = parseScriptIntoSegments(nextText, [], 5);
+      const { storySpine: extractedSpine, cleanScript } = extractStorySpineFromScript(res.text.trim());
+      const parsedSegs = parseScriptIntoSegments(cleanScript, [], 5);
       onPatchSb({
-        scriptText: nextText,
+        storySpine: extractedSpine || sb.storySpine || "",
+        scriptText: cleanScript,
         segments: parsedSegs,
         scriptApproved: false,
       });
       if (parsedSegs.length > 0) setEditorMode("segments");
       setNotice(
-        `Naskah selesai dibagi menjadi ${parsedSegs.length || 1} segmen${res.usedModel ? ` (${res.usedModel.split("/").pop()})` : ""}. Atur jumlah panel per segmen (4–7 panel) bila perlu, lalu klik ACC Naskah.`,
+        `Naskah utuh selesai (${parsedSegs.length || 1} segmen${extractedSpine ? " + Benang Merah terkunci" : ""}${res.usedModel ? ` · ${res.usedModel.split("/").pop()}` : ""}). Periksa alur & dialognya, lalu klik ACC Naskah.`,
       );
     } catch (err) {
       setError(`Gagal generate naskah: ${(err as Error).message}`);
@@ -153,24 +165,30 @@ export default function ScriptStep({
     }
   };
 
-  const handleReviseScript = async () => {
+  const handleReviseScript = async (instructionOverride?: string) => {
     if (!sb.scriptText.trim()) {
       setError("Belum ada naskah untuk direvisi.");
       return;
     }
-    if (!reviseNote.trim()) {
+    const instruction = (instructionOverride ?? reviseNote).trim();
+    if (!instruction) {
       setError("Tulis instruksi revisi terlebih dahulu (misal: tambah 1 segmen penutup yang hangat).");
       return;
     }
-    setBusy("Merevisi naskah per segmen sesuai catatan Anda...");
+    setBusy(
+      instructionOverride
+        ? "Memperkuat benang merah, alur sebab–akibat, dan dialog naskah..."
+        : "Merevisi naskah per segmen sesuai catatan Anda...",
+    );
     setError("");
     setNotice("");
     try {
       const built = buildReviseScriptPrompt({
         projectName: projectName.trim() || "Proyek Storyboard",
         idea: sb.idea,
+        storySpine: sb.storySpine,
         currentScript: sb.scriptText,
-        instruction: reviseNote,
+        instruction,
       });
       const res = await callAi(textProfile, "text", built);
       if (res.discovered) onSyncDiscoveredModels(textProfile.id, res.discovered);
@@ -178,16 +196,19 @@ export default function ScriptStep({
         setError(res.error || "AI gagal merevisi naskah.");
         return;
       }
-      const nextText = res.text.trim();
-      const parsedSegs = parseScriptIntoSegments(nextText, segments, 5);
+      const { storySpine: extractedSpine, cleanScript } = extractStorySpineFromScript(res.text.trim());
+      const parsedSegs = parseScriptIntoSegments(cleanScript, segments, 5);
       onPatchSb({
-        scriptText: nextText,
+        storySpine: extractedSpine || sb.storySpine || "",
+        scriptText: cleanScript,
         segments: parsedSegs,
         scriptApproved: false,
       });
       if (parsedSegs.length > 0) setEditorMode("segments");
-      setReviseNote("");
-      setNotice(`Naskah diperbarui (${parsedSegs.length || 1} segmen).`);
+      if (!instructionOverride) setReviseNote("");
+      setNotice(
+        `Naskah diperbarui (${parsedSegs.length || 1} segmen${extractedSpine ? " · Benang Merah diperbarui" : ""}).`,
+      );
     } catch (err) {
       setError(`Gagal merevisi naskah: ${(err as Error).message}`);
     } finally {
@@ -374,6 +395,52 @@ export default function ScriptStep({
               </button>
             </div>
           </div>
+
+          {/* Unified Story Spine (Benang Merah) carried cleanly into every Segment & Storyboard Panel */}
+          {sb.scriptText.trim() || sb.storySpine?.trim() ? (
+            <div className="fieldGroup" style={{ marginBottom: 4 }}>
+              <label className="fieldLabel" htmlFor="sb-story-spine">
+                Benang Merah Cerita (1 Kesatuan Alur: Tokoh &amp; Tujuan → Konflik → Titik Balik → Resolusi)
+              </label>
+              <input
+                id="sb-story-spine"
+                className="input inputSm"
+                value={sb.storySpine || ""}
+                disabled={isBusy}
+                onChange={(e) => onPatchSb({ storySpine: e.target.value })}
+                placeholder="Ringkasan 1 kalimat utuh agar seluruh segmen & panel tidak melenceng atau lompat-lompat..."
+              />
+            </div>
+          ) : null}
+
+          {sb.scriptText.trim() && !coherence.ok ? (
+            <div
+              className="alertBox"
+              role="status"
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+              }}
+            >
+              <div style={{ flex: "1 1 240px" }}>
+                <strong>Cek Benang Merah:</strong> {coherence.warnings[0]}
+                {coherence.warnings.length > 1 ? ` (+${coherence.warnings.length - 1} catatan lain)` : ""}
+              </div>
+              <button
+                type="button"
+                className="btn btnSm"
+                disabled={isBusy}
+                onClick={() => void handleReviseScript(STRENGTHEN_SPINE_INSTRUCTION)}
+                title="Revisi naskah otomatis agar punya benang merah 4 babak sebab–akibat, dialog bermakna, dan bebas shot-list hampa"
+              >
+                <SparklesIcon size={13} />
+                <span>Perkuat Benang Merah &amp; Alur (AI)</span>
+              </button>
+            </div>
+          ) : null}
 
           {editorMode === "segments" ? (
             segments.length === 0 ? (

@@ -87,6 +87,7 @@ export interface StoryFrame {
 export interface StoryboardData {
   step: StoryboardStep;
   idea: string;
+  storySpine?: string; // Benang merah 1 kesatuan cerita (Tokoh & Tujuan -> Konflik -> Titik Balik -> Resolusi)
   aspectRatio: AspectRatio;
   visualStyle: string;
   scriptText: string;
