@@ -79,6 +79,16 @@ import {
   OMNI_MODEL_ID,
   validateGoogleFileUri,
 } from "./omniAnimation.ts";
+import {
+  buildFlowAssetImagePackZip,
+  buildFlowImageFolderSlug,
+  buildFlowPanelPrompt,
+  buildFlowStoryboardImagePackZip,
+  extractImageIndexFromFilename,
+  FLOW_IMAGE_MODELS,
+  matchDownloadedImageToSlot,
+} from "./flowImageConnector.ts";
+import { ANIMATIC_ATMOSPHERES, ANIMATIC_SCORES } from "./animaticAudio.ts";
 import type { NmcProject, SegmentNodeData } from "./types.ts";
 
 // Synthetic test fixture built in test code only (no hardcoded sample in app source)
@@ -885,5 +895,91 @@ assert.ok(runnerCode.includes("keyframes/S01_P02.jpg"));
 const agentPrompt = buildFlowConnectorAgentPrompt(renderedSegmented, segPlans, { model: "omni-flash" });
 assert.ok(agentPrompt.includes("flow-auto status --site flow"));
 assert.ok(agentPrompt.includes("node run_flow_connector.mjs"));
+
+// 17. Flow Connector Nano Banana 2 Lite Image Generation (Step 2 Assets & Step 3 Storyboard Panels)
+assert.equal(FLOW_IMAGE_MODELS[0].value, "nano-banana-2-lite");
+assert.equal(buildFlowImageFolderSlug("Hujan Pertama di Stasiun!", "assets"), "nmcgen-hujan-pertama-di-stasiun-assets");
+assert.equal(buildFlowImageFolderSlug("Hujan Pertama di Stasiun!", "panels"), "nmcgen-hujan-pertama-di-stasiun-panels");
+
+assert.equal(extractImageIndexFromFilename("1 - Raka.png"), 1);
+assert.equal(extractImageIndexFromFilename("02_panel.jpg"), 2);
+assert.equal(extractImageIndexFromFilename("A03_amplop.webp"), 3);
+assert.equal(extractImageIndexFromFilename("P08_ending.png"), 8);
+assert.equal(extractImageIndexFromFilename("20261126_161022.png"), null, "Must ignore date timestamps");
+
+const assetSlots = accAssets;
+const matchedAsset2 = matchDownloadedImageToSlot("2 - Kafe Senja.png", assetSlots, new Set([assetSlots[0].id]));
+assert.equal(matchedAsset2?.id, assetSlots[1].id);
+const matchedAssetFallback = matchDownloadedImageToSlot("google_flow_img.png", assetSlots, new Set([assetSlots[0].id]));
+assert.equal(matchedAssetFallback?.id, assetSlots[1].id, "Unnumbered image must fall back to first empty slot");
+const matchedAssetUpgrade = matchDownloadedImageToSlot(
+  "1 - Dimas.png",
+  assetSlots,
+  new Set([assetSlots[0].id]),
+  { allowOverwriteIndexed: true },
+);
+assert.equal(matchedAssetUpgrade?.id, assetSlots[0].id, "Explicitly indexed file can upgrade existing slot as new candidate");
+
+// Asset ZIP pack with slot 1 already drawn & slots 2..3 missing -> stable 1-based indices 2 and 3!
+const partialAssetsSb = {
+  ...segmentedProject.storyboard!,
+  assets: accAssets.map((a, idx) =>
+    idx === 0 ? a : { ...a, candidates: [], selectedCandidateId: undefined },
+  ),
+};
+const assetPack = buildFlowAssetImagePackZip("Kopi Senja", partialAssetsSb, {
+  model: "nano-banana-2-lite",
+  onlyMissing: true,
+});
+assert.equal(assetPack.zipBytes[0], 0x50);
+assert.equal(assetPack.zipBytes[1], 0x4b);
+assert.equal(assetPack.jobCount, 2, "Only missing assets should be queued when onlyMissing=true");
+assert.ok(assetPack.runnerScript.includes('"index": 2'), "Missing asset #2 must keep stable 1-based slot index 2");
+assert.ok(assetPack.runnerScript.includes('"index": 3'), "Missing asset #3 must keep stable 1-based slot index 3");
+assert.ok(assetPack.runnerScript.includes("flow-text-to-image"));
+assert.ok(assetPack.runnerScript.includes("nano-banana-2-lite"));
+const assetZipAscii = new TextDecoder("latin1").decode(assetPack.zipBytes);
+assert.ok(assetZipAscii.includes("run_flow_images.mjs"));
+assert.ok(assetZipAscii.includes("run_flow_images.bat"));
+assert.ok(assetZipAscii.includes("run_flow_images.command"));
+assert.ok(assetZipAscii.includes("FLOW_ASSETS_PROMPT.md"));
+
+// Storyboard panel prompt uses Nano Banana natural-language references (NOT FLUX.2 0-based "image 0")
+const flowPanelPrompt = buildFlowPanelPrompt(
+  segmentedProject.storyboard!.frames[0],
+  segmentedProject.storyboard!,
+  [accAssets[0], accAssets[1]],
+);
+assert.ok(flowPanelPrompt.includes('Reference image 1 shows character "Dimas"'));
+assert.ok(flowPanelPrompt.includes('Reference image 2 shows location "Kafe Senja"'));
+assert.equal(flowPanelPrompt.includes("image 0"), false, "Nano Banana prompt must not use FLUX.2 0-based image 0 syntax");
+
+// Storyboard panel ZIP pack bundles ACC refs/ and preserves global 1-based slot index for missing panels
+const partialPanelsSb = {
+  ...renderedSegmented.storyboard!,
+  frames: renderedSegmented.storyboard!.frames.map((f, idx) =>
+    idx === 0 ? f : { ...f, candidates: [], selectedCandidateId: undefined },
+  ),
+};
+const panelPack = buildFlowStoryboardImagePackZip("Kopi Senja", partialPanelsSb, {
+  model: "nano-banana-2-lite",
+  onlyMissing: true,
+});
+assert.equal(panelPack.zipBytes[0], 0x50);
+assert.equal(panelPack.zipBytes[1], 0x4b);
+assert.equal(panelPack.jobCount, 2, "Only missing panels (#2 & #3) should be queued");
+assert.ok(panelPack.runnerScript.includes('"index": 2'));
+assert.ok(panelPack.runnerScript.includes('"index": 3'));
+assert.ok(panelPack.runnerScript.includes("flow-image-to-image"));
+assert.ok(panelPack.runnerScript.includes("refs/01_dimas.png"));
+const panelZipAscii = new TextDecoder("latin1").decode(panelPack.zipBytes);
+assert.ok(panelZipAscii.includes("refs/01_dimas.png"), "Panel ZIP must bundle ACC reference image files");
+assert.ok(panelZipAscii.includes("FLOW_PANELS_PROMPT.md"));
+
+// 18. Cinema Animatic atmosphere & built-in soundtrack presets
+assert.ok(ANIMATIC_ATMOSPHERES.some((a) => a.value === "rain"));
+assert.ok(ANIMATIC_ATMOSPHERES.some((a) => a.value === "golden"));
+assert.ok(ANIMATIC_SCORES.some((s) => s.value === "rain_piano"));
+assert.ok(ANIMATIC_SCORES.some((s) => s.value === "morning_warm"));
 
 console.log("nmcGen pipeline tests: all passed");

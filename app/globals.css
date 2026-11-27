@@ -3042,6 +3042,28 @@ details[open] > .animateDetailsSummary::before {
   transition: width 80ms linear;
 }
 
+.animaticOptionRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.animaticToggleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+.animaticAdvancedBody {
+  margin-top: 10px;
+  gap: 12px;
+}
+
 .autoProgressCard {
   background: var(--surface);
   border: 1px solid rgba(229, 154, 60, 0.55);

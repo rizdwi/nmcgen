@@ -38,13 +38,23 @@ import {
   VALID_CAMERA_ANGLES,
   VALID_SHOT_SIZES,
 } from "@/lib/storyboard";
+import { ANIMATION_APP_LINKS } from "@/lib/omniAnimation";
+import {
+  buildFlowImageFolderSlug,
+  buildFlowStoryboardImagePackZip,
+  FLOW_IMAGE_MODELS,
+  matchDownloadedImageToSlot,
+  type FlowConnectorImageModel,
+} from "@/lib/flowImageConnector";
 import {
   ArrowRightIcon,
   CheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
+  CopyIcon,
   DownloadIcon,
+  ExternalLinkIcon,
   FilmIcon,
   GridIcon,
   PlusIcon,
@@ -53,6 +63,41 @@ import {
   TrashIcon,
   UploadIcon,
 } from "./Icons";
+
+interface FsFileHandleLike {
+  kind: "file";
+  name: string;
+  getFile: () => Promise<File>;
+}
+
+interface FsDirHandleLike {
+  kind?: "directory";
+  name: string;
+  values: () => AsyncIterable<FsFileHandleLike | FsDirHandleLike | { kind: string; name: string }>;
+}
+
+type WindowWithDirPicker = Window & {
+  showDirectoryPicker?: (opts?: {
+    id?: string;
+    mode?: "read" | "readwrite";
+    startIn?: string;
+  }) => Promise<FsDirHandleLike>;
+};
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp)$/i;
+const FLOW_IMAGE_MODEL_STORAGE_KEY = "nmcgen.flowImageModel";
+const FLOW_CLI_INSTALL_CMD = "npm install -g flow-connector-cli";
+
+function loadPreferredFlowImageModel(): FlowConnectorImageModel {
+  if (typeof window === "undefined") return "nano-banana-2-lite";
+  try {
+    const saved = window.localStorage.getItem(FLOW_IMAGE_MODEL_STORAGE_KEY);
+    if (saved === "nano-banana-2-lite" || saved === "nano-banana-2" || saved === "nano-banana-pro") return saved;
+  } catch {
+    // ignore storage errors
+  }
+  return "nano-banana-2-lite";
+}
 
 interface StoryboardStepProps {
   project: NmcProject;
@@ -112,17 +157,43 @@ export default function StoryboardStep({
   } | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [copyFeedback, setCopyFeedback] = useState("");
   const [continueNote, setContinueNote] = useState("");
   const [autoGenOnContinue, setAutoGenOnContinue] = useState(true);
   const [quickEditText, setQuickEditText] = useState("");
   const [showScriptDrawer, setShowScriptDrawer] = useState(false);
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
+  const [flowImageModel, setFlowImageModel] = useState<FlowConnectorImageModel>(() => loadPreferredFlowImageModel());
+  const [includeExistingFlow, setIncludeExistingFlow] = useState(false);
+  const [watchFolderName, setWatchFolderName] = useState("");
+  const [folderWatchSupported, setFolderWatchSupported] = useState(false);
+
   const dirtyPromptIdsRef = useRef<Set<string>>(new Set());
   const autoStopRef = useRef(false);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const batchPanelInputRef = useRef<HTMLInputElement>(null);
+  const watchDirHandleRef = useRef<FsDirHandleLike | null>(null);
+  const seenFilesRef = useRef<Set<string>>(new Set());
+  const pendingFileSizesRef = useRef<Map<string, number>>(new Map());
+  const watchStartedAtRef = useRef<number>(0);
 
   const latestSbRef = useRef<StoryboardData>(sb);
   latestSbRef.current = sb;
+
+  const flowFolderSlug = useMemo(() => buildFlowImageFolderSlug(project.name, "panels"), [project.name]);
+
+  useEffect(() => {
+    setFolderWatchSupported(typeof window !== "undefined" && "showDirectoryPicker" in window);
+  }, []);
+
+  const selectFlowImageModel = (nextModel: FlowConnectorImageModel) => {
+    setFlowImageModel(nextModel);
+    try {
+      window.localStorage.setItem(FLOW_IMAGE_MODEL_STORAGE_KEY, nextModel);
+    } catch {
+      // ignore storage errors
+    }
+  };
 
   // Approved assets only (fallback to all assets if user bypassed with manual edits)
   const approvedAssets = useMemo(() => {
@@ -608,13 +679,15 @@ export default function StoryboardStep({
   };
 
   // True 1-Tap Automation: plan + draw FLUX.2 4B panels continuously across ALL segments (or a single segment)
-  // without requiring repeated Continue / Next Segment / Generate (4B) taps.
+  // Supports `planOnly: true` (text AI only, zero image quota!) for seamless Flow Connector Nano Banana 2 Lite workflow.
   const handleAutoGenerateAllSegments = async (options?: {
     onlySingleSegment?: boolean;
     targetSegment?: StorySegment;
     initialDirection?: string;
+    planOnly?: boolean;
   }) => {
     const onlySingle = Boolean(options?.onlySingleSegment);
+    const planOnly = Boolean(options?.planOnly);
     const curSb0 = latestSbRef.current;
     const allSegs0 = getStoryboardSegments(curSb0);
     const targetSegments = onlySingle
@@ -627,22 +700,24 @@ export default function StoryboardStep({
       return;
     }
 
-    // Calculate total panels we expect to draw across the chosen scope
+    // Calculate total panels we expect to draft/draw across the chosen scope
     const ordered0 = reindexStoryboardFrames(curSb0.frames, allSegs0);
     let totalWork = 0;
     for (const seg of targetSegments) {
       const segFrames = ordered0.filter((f) => f.segmentId === seg.id);
       const target = clampTargetPanels(seg.targetPanels);
-      const undrawn = segFrames.filter((f) => !getSelectedFrameImage(f)).length;
+      const undrawn = planOnly ? 0 : segFrames.filter((f) => !getSelectedFrameImage(f)).length;
       const missing = Math.max(0, target - segFrames.length);
       totalWork += undrawn + missing;
     }
 
     if (totalWork === 0) {
       setNotice(
-        onlySingle
-          ? `Segmen ${targetSegments[0].index} sudah lengkap semua panel & gambarnya.`
-          : `Seluruh ${allSegs0.length} segmen sudah lengkap semua panel & gambarnya!`,
+        planOnly
+          ? `Semua draft panel di seluruh ${allSegs0.length} segmen sudah tersusun! Unduh Paket Gambar Panel (.zip) untuk menggambar lewat Flow Connector.`
+          : onlySingle
+            ? `Segmen ${targetSegments[0].index} sudah lengkap semua panel & gambarnya.`
+            : `Seluruh ${allSegs0.length} segmen sudah lengkap semua panel & gambarnya!`,
       );
       return;
     }
@@ -671,31 +746,14 @@ export default function StoryboardStep({
           const orderedNow = reindexStoryboardFrames(curSb.frames, segs);
           const segFramesNow = orderedNow.filter((f) => f.segmentId === seg.id);
 
-          // 1. Always render any existing panel in this segment that still has no image
-          const undrawn = segFramesNow.find((f) => !getSelectedFrameImage(f));
-          if (undrawn) {
-            const pNum = undrawn.panelNumber ?? 1;
-            lastPanelNum = pNum;
-            setActiveSegmentId(seg.id);
-            setActiveFrameId(undrawn.id);
-            setAutoProgress({
-              done: doneCount,
-              total: totalWork,
-              segIndex: seg.index,
-              totalSegs: segs.length,
-              panelNum: pNum,
-              segTarget: targetPanels,
-              phase: "drawing",
-            });
-            setBusy(
-              `Auto (${doneCount + 1}/${totalWork}) · Segmen ${seg.index}/${segs.length} · Menggambar Panel ${pNum}/${targetPanels} (FLUX.2 4B)...`,
-            );
-
-            try {
-              await runGenerateFrameImage(undrawn, curSb);
-            } catch (firstErr) {
-              const msg = (firstErr as Error).message || "";
-              if (autoStopRef.current || isAuthOrConfigError(msg)) throw firstErr;
+          // 1. Unless planOnly is set, render any existing panel in this segment that still has no image
+          if (!planOnly) {
+            const undrawn = segFramesNow.find((f) => !getSelectedFrameImage(f));
+            if (undrawn) {
+              const pNum = undrawn.panelNumber ?? 1;
+              lastPanelNum = pNum;
+              setActiveSegmentId(seg.id);
+              setActiveFrameId(undrawn.id);
               setAutoProgress({
                 done: doneCount,
                 total: totalWork,
@@ -703,22 +761,41 @@ export default function StoryboardStep({
                 totalSegs: segs.length,
                 panelNum: pNum,
                 segTarget: targetPanels,
-                phase: "retrying",
+                phase: "drawing",
               });
-              setBusy(`Koneksi sempat terputus — mengulang gambar Segmen ${seg.index} · Panel ${pNum}...`);
-              await sleepMs(1500);
-              if (autoStopRef.current) break;
-              await runGenerateFrameImage(undrawn, latestSbRef.current);
-            }
+              setBusy(
+                `Auto (${doneCount + 1}/${totalWork}) · Segmen ${seg.index}/${segs.length} · Menggambar Panel ${pNum}/${targetPanels} (FLUX.2 4B)...`,
+              );
 
-            doneCount += 1;
-            continue;
+              try {
+                await runGenerateFrameImage(undrawn, curSb);
+              } catch (firstErr) {
+                const msg = (firstErr as Error).message || "";
+                if (autoStopRef.current || isAuthOrConfigError(msg)) throw firstErr;
+                setAutoProgress({
+                  done: doneCount,
+                  total: totalWork,
+                  segIndex: seg.index,
+                  totalSegs: segs.length,
+                  panelNum: pNum,
+                  segTarget: targetPanels,
+                  phase: "retrying",
+                });
+                setBusy(`Koneksi sempat terputus — mengulang gambar Segmen ${seg.index} · Panel ${pNum}...`);
+                await sleepMs(1500);
+                if (autoStopRef.current) break;
+                await runGenerateFrameImage(undrawn, latestSbRef.current);
+              }
+
+              doneCount += 1;
+              continue;
+            }
           }
 
-          // 2. Segment already has all target panels drawn -> automatically advance to next segment!
+          // 2. Segment already has all target panels -> automatically advance to next segment!
           if (segFramesNow.length >= targetPanels) break;
 
-          // 3. Plan next panel AND immediately draw its FLUX.2 4B image in one seamless cycle
+          // 3. Plan next panel (and draw its FLUX.2 4B image unless planOnly)
           const nextPanelNum = segFramesNow.length + 1;
           lastPanelNum = nextPanelNum;
           setActiveSegmentId(seg.id);
@@ -732,7 +809,7 @@ export default function StoryboardStep({
             phase: "planning",
           });
           setBusy(
-            `Auto (${doneCount + 1}/${totalWork}) · Segmen ${seg.index}/${segs.length} · Menyusun Panel ${nextPanelNum}/${targetPanels}...`,
+            `${planOnly ? "Draft Teks" : "Auto"} (${doneCount + 1}/${totalWork}) · Segmen ${seg.index}/${segs.length} · Menyusun Panel ${nextPanelNum}/${targetPanels}...`,
           );
 
           const built = buildNextFramePrompt({
@@ -781,6 +858,11 @@ export default function StoryboardStep({
 
           if (autoStopRef.current) break;
 
+          if (planOnly) {
+            doneCount += 1;
+            continue;
+          }
+
           setAutoProgress({
             done: doneCount,
             total: totalWork,
@@ -820,7 +902,11 @@ export default function StoryboardStep({
 
       if (autoStopRef.current) {
         setNotice(
-          `Auto-generate dijeda (${doneCount}/${totalWork} panel selesai & tersimpan). Klik "Generate Semua Sisa" kapan saja untuk melanjutkan.`,
+          `${planOnly ? "Penyusunan draft" : "Auto-generate"} dijeda (${doneCount}/${totalWork} panel selesai & tersimpan).`,
+        );
+      } else if (planOnly) {
+        setNotice(
+          `Selesai menyusun draft ${doneCount} panel baru (Teks saja · bebas kuota gambar)! Unduh Paket Gambar Panel (.zip) di kotak Flow Connector untuk menggambar semua panel pakai Nano Banana 2 Lite (0 kredit Flow).`,
         );
       } else if (onlySingle) {
         setNotice(
@@ -834,7 +920,7 @@ export default function StoryboardStep({
       }
     } catch (err) {
       setError(
-        `Terhenti di Segmen ${lastSegIndex} · Panel ${lastPanelNum}: ${(err as Error).message}. Progress sebelumnya aman tersimpan — klik "Generate Semua Sisa" untuk melanjutkan.`,
+        `Terhenti di Segmen ${lastSegIndex} · Panel ${lastPanelNum}: ${(err as Error).message}. Progress sebelumnya aman tersimpan.`,
       );
     } finally {
       setAutoRunning(false);
@@ -854,6 +940,221 @@ export default function StoryboardStep({
     autoStopRef.current = true;
     setNotice("Menghentikan setelah panel yang sedang diproses selesai...");
   };
+
+  // =========================================================================
+  // FLOW CONNECTOR (NANO BANANA 2 LITE · 0 KREDIT) + AUTO-WATCH DOWNLOADS
+  // =========================================================================
+  const attachImageFileToFrame = async (
+    frame: StoryFrame,
+    file: File,
+    modelLabel: string,
+    customNotice?: string,
+  ) => {
+    const rawDataUrl = await fileToDataUrl(file);
+    const optimizedImg = await compressImageForStorage(rawDataUrl, { maxSide: 1280, quality: 0.84 });
+    const candId = uid();
+    const updated = latestSbRef.current.frames.map((f) =>
+      f.id === frame.id
+        ? {
+            ...f,
+            candidates: trimCandidates(
+              [...f.candidates, { id: candId, dataUrl: optimizedImg, model: modelLabel, createdAt: Date.now() }],
+              candId,
+              3,
+            ),
+            selectedCandidateId: candId,
+          }
+        : f,
+    );
+    commitFrames(updated);
+    setNotice(customNotice || `Gambar "${file.name}" dipasang ke Panel ${frame.panelNumber ?? frame.index}.`);
+    setError("");
+  };
+
+  const handleBatchPanelImagesChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? [])
+      .filter((f) => f.type.startsWith("image/") || IMAGE_EXT_RE.test(f.name))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    e.target.value = "";
+    if (files.length === 0) return;
+
+    const segs = getStoryboardSegments(latestSbRef.current);
+    const curOrdered = reindexStoryboardFrames(latestSbRef.current.frames, segs);
+    if (curOrdered.length === 0) {
+      setError("Susun draft panel terlebih dahulu sebelum memasang gambar panel.");
+      return;
+    }
+
+    const attachedIds = new Set(curOrdered.filter((f) => Boolean(getSelectedFrameImage(f))).map((f) => f.id));
+    const batchUsedIds = new Set<string>();
+    let assigned = 0;
+
+    try {
+      for (const file of files) {
+        const target =
+          matchDownloadedImageToSlot(file.name, curOrdered, attachedIds, { allowOverwriteIndexed: true }) ??
+          curOrdered.find((f) => !batchUsedIds.has(f.id)) ??
+          null;
+        if (!target || batchUsedIds.has(target.id)) continue;
+        batchUsedIds.add(target.id);
+        attachedIds.add(target.id);
+        await attachImageFileToFrame(target, file, flowImageModel);
+        assigned += 1;
+      }
+      if (assigned > 0) {
+        setNotice(`${assigned} gambar panel berhasil dipasang otomatis sesuai nomor urut!`);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handleCopyText = async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyFeedback(key);
+      setTimeout(() => setCopyFeedback(""), 2200);
+    } catch {
+      setError("Gagal menyalin ke clipboard.");
+    }
+  };
+
+  const collectImageEntries = async (
+    rootDir: FsDirHandleLike,
+  ): Promise<Array<{ file: File; folderLabel: string; sigKey: string }>> => {
+    const out: Array<{ file: File; folderLabel: string; sigKey: string }> = [];
+    const scanOneDir = async (dir: FsDirHandleLike, prefix: string) => {
+      for await (const entry of dir.values()) {
+        if (entry.kind === "file") {
+          const name = entry.name || "";
+          if (!IMAGE_EXT_RE.test(name) || name.startsWith(".") || name.endsWith(".crdownload")) continue;
+          const file = await (entry as FsFileHandleLike).getFile().catch(() => null);
+          if (!file || file.size === 0) continue;
+          const folderLabel = prefix ? `${rootDir.name}/${prefix}` : rootDir.name;
+          out.push({ file, folderLabel, sigKey: `${prefix}/${file.name}` });
+        } else if (entry.kind === "directory" && !prefix) {
+          const subName = entry.name || "";
+          if (!subName || subName.startsWith(".")) continue;
+          try {
+            await scanOneDir(entry as FsDirHandleLike, subName);
+          } catch {
+            // Skip unreadable subfolder
+          }
+        }
+      }
+    };
+    await scanOneDir(rootDir, "");
+    return out;
+  };
+
+  const scanWatchedFolder = async () => {
+    const dir = watchDirHandleRef.current;
+    if (!dir) return;
+    try {
+      const entries = await collectImageEntries(dir);
+      const freshItems: Array<{ file: File; folderLabel: string }> = [];
+
+      for (const { file, folderLabel, sigKey } of entries) {
+        const sig = `${sigKey}:${file.lastModified}:${file.size}`;
+        if (seenFilesRef.current.has(sig)) continue;
+        if (file.lastModified < watchStartedAtRef.current - 5000) {
+          seenFilesRef.current.add(sig);
+          continue;
+        }
+        const prevSize = pendingFileSizesRef.current.get(sigKey);
+        if (prevSize !== file.size && Date.now() - file.lastModified < 1500) {
+          pendingFileSizesRef.current.set(sigKey, file.size);
+          continue;
+        }
+        pendingFileSizesRef.current.delete(sigKey);
+        seenFilesRef.current.add(sig);
+        freshItems.push({ file, folderLabel });
+      }
+
+      if (freshItems.length === 0) return;
+      freshItems.sort((a, b) => a.file.lastModified - b.file.lastModified);
+
+      const segs = getStoryboardSegments(latestSbRef.current);
+      const curOrdered = reindexStoryboardFrames(latestSbRef.current.frames, segs);
+      const attachedIds = new Set(curOrdered.filter((f) => Boolean(getSelectedFrameImage(f))).map((f) => f.id));
+      const scanMatchedIds = new Set<string>();
+
+      for (const { file, folderLabel } of freshItems) {
+        const target = matchDownloadedImageToSlot(file.name, curOrdered, attachedIds, {
+          allowOverwriteIndexed: true,
+        });
+        if (!target || scanMatchedIds.has(target.id)) continue;
+        scanMatchedIds.add(target.id);
+        attachedIds.add(target.id);
+        const seg = segs.find((s) => s.id === target.segmentId);
+        await attachImageFileToFrame(
+          target,
+          file,
+          flowImageModel,
+          `Otomatis terpasang dari "${folderLabel}": "${file.name}" → Segmen ${seg?.index ?? 1} · Panel ${target.panelNumber ?? target.index}!`,
+        );
+      }
+    } catch {
+      // Permission revoked or folder unavailable
+    }
+  };
+
+  const handleEnableFolderWatch = async () => {
+    const picker = (window as WindowWithDirPicker).showDirectoryPicker;
+    if (!picker) {
+      setError("Browser ini belum mendukung pantau folder otomatis (tersedia di Chrome/Edge Desktop).");
+      return;
+    }
+    try {
+      const dir = await picker({
+        id: "nmcgen-flow-panels",
+        mode: "read",
+        startIn: "downloads",
+      });
+      const existing = await collectImageEntries(dir);
+      const snapshot = new Set<string>();
+      for (const item of existing) {
+        snapshot.add(`${item.sigKey}:${item.file.lastModified}:${item.file.size}`);
+      }
+      seenFilesRef.current = snapshot;
+      pendingFileSizesRef.current.clear();
+      watchStartedAtRef.current = Date.now();
+      watchDirHandleRef.current = dir;
+      setWatchFolderName(dir.name || "Downloads");
+      setError("");
+      setNotice(
+        `Pantau otomatis "${dir.name || "Downloads"}" (+ subfolder "${flowFolderSlug}") aktif! Gambar panel baru dari Flow Connector langsung menempel sesuai nomor urut.`,
+      );
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        setError(`Gagal mengaktifkan pantau folder: ${(err as Error).message}`);
+      }
+    }
+  };
+
+  const handleStopFolderWatch = () => {
+    watchDirHandleRef.current = null;
+    setWatchFolderName("");
+    setNotice("Pantau folder Downloads panel dimatikan.");
+  };
+
+  useEffect(() => {
+    if (!watchFolderName) return;
+    const timer = window.setInterval(() => {
+      void scanWatchedFolder();
+    }, 2500);
+    const onReturn = () => {
+      if (document.visibilityState !== "hidden") void scanWatchedFolder();
+    };
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchFolderName, flowImageModel]);
 
   const handleExportSegmentStrip = async (seg: StorySegment) => {
     const segFrames = orderedFrames.filter((f) => f.segmentId === seg.id);
@@ -961,6 +1262,8 @@ export default function StoryboardStep({
     let remainingSegments = 0;
     let drawnPanels = 0;
     let totalPanels = 0;
+    let unplannedPanels = 0;
+    let undrawnPanels = 0;
 
     for (const seg of segments) {
       const segFrames = orderedFrames.filter((f) => f.segmentId === seg.id);
@@ -970,13 +1273,54 @@ export default function StoryboardStep({
       const missing = Math.max(0, target - segFrames.length);
       const need = undrawn + missing;
       drawnPanels += drawn;
+      undrawnPanels += undrawn;
+      unplannedPanels += missing;
       totalPanels += Math.max(target, segFrames.length);
       remainingPanels += need;
       if (need > 0) remainingSegments += 1;
     }
 
-    return { remainingPanels, remainingSegments, drawnPanels, totalPanels };
+    return { remainingPanels, remainingSegments, drawnPanels, totalPanels, unplannedPanels, undrawnPanels };
   }, [segments, orderedFrames]);
+
+  const effectiveOnlyMissingPanels = !includeExistingFlow && remainingStats.undrawnPanels > 0;
+
+  const handleDownloadFlowPanelsZip = () => {
+    if (orderedFrames.length === 0) {
+      setError("Susun minimal 1 draft panel terlebih dahulu (klik Susun Draft Semua Panel — Teks Saja).");
+      return;
+    }
+    const pack = buildFlowStoryboardImagePackZip(
+      project.name,
+      { ...sb, segments, frames: orderedFrames },
+      { model: flowImageModel, onlyMissing: effectiveOnlyMissingPanels },
+    );
+    if (pack.jobCount === 0) {
+      setNotice("Semua panel sudah bergambar. Centang opsi sertakan panel lama jika ingin render ulang.");
+      return;
+    }
+    const copy = new Uint8Array(pack.zipBytes.byteLength);
+    copy.set(pack.zipBytes);
+    const safeSlug = project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen";
+    downloadBlob(new Blob([copy], { type: "application/zip" }), `${safeSlug}-flow-panels-${flowImageModel}.zip`);
+    setError("");
+    setNotice(
+      `Paket Flow Connector (${pack.jobCount} panel + referensi aset ACC · ${flowImageModel} · 0 kredit Flow) diunduh! Ekstrak lalu jalankan run_flow_images saat tab flow.google.com terbuka.`,
+    );
+  };
+
+  const handleCopyFlowPanelsAgentPrompt = async () => {
+    if (orderedFrames.length === 0) {
+      setError("Susun minimal 1 draft panel terlebih dahulu.");
+      return;
+    }
+    const pack = buildFlowStoryboardImagePackZip(
+      project.name,
+      { ...sb, segments, frames: orderedFrames },
+      { model: flowImageModel, onlyMissing: effectiveOnlyMissingPanels },
+    );
+    await handleCopyText(pack.agentPrompt, "flow-panels-agent");
+  };
 
   const lightboxFrame = lightboxIdx !== null ? orderedFrames[lightboxIdx] ?? null : null;
   const lightboxSegment = lightboxFrame
@@ -988,15 +1332,25 @@ export default function StoryboardStep({
 
   return (
     <div className="stepContainer">
+      <input
+        ref={batchPanelInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="srOnly"
+        onChange={(e) => void handleBatchPanelImagesChange(e)}
+      />
+
       {/* Step header with instant Editor vs Storyboard Strip Preview switcher */}
       <div className="stepIntroRow">
         <div>
           <span className="stepKicker mono">TAHAP 3 DARI 4 · STORYBOARD PER-SEGMEN (4–7 PANEL)</span>
           <h2 className="stepTitle">Storyboard Per-Segmen</h2>
           <p className="stepSubtitle">
-            Klik <strong>Generate Semua Segmen</strong> sekali saja untuk menyusun &amp; menggambar otomatis seluruh{" "}
+            Klik <strong>Generate Semua</strong> untuk menyusun &amp; menggambar otomatis seluruh{" "}
             <strong>{segments.length} segmen ({totalTargetPanels} panel)</strong> dengan{" "}
-            <strong>{approvedAssets.length} aset ACC</strong> tanpa perlu klik Continue berulang kali.
+            <strong>{approvedAssets.length} aset ACC</strong>, atau pakai{" "}
+            <strong>Flow Connector (Nano Banana 2 Lite · 0 Kredit)</strong> jika kuota API gambar habis.
           </p>
         </div>
 
@@ -1061,15 +1415,207 @@ export default function StoryboardStep({
               type="button"
               className="btn btnOk btnSm"
               onClick={onGoToAnimate}
-              title="Animasikan seluruh storyboard lewat Antigravity, Gemini, atau Omni 1.2 Flash"
+              title="Animasikan seluruh storyboard lewat Google Flow, Gemini Omni 1.2, atau Animatic Browser"
             >
               <SparklesIcon size={13} />
-              <span>Animasikan (Gemini / Omni 1.2)</span>
+              <span>Animasikan (Flow / Animatic)</span>
               <ArrowRightIcon size={13} />
             </button>
           ) : null}
         </div>
       </div>
+
+      {/* Collapsible Zero-API-Quota Flow Connector Panel Image Runner (Nano Banana 2 Lite · 0 Flow Credits) */}
+      <details className="subtleDetails animateCompactDetails">
+        <summary className="animateDetailsSummary">
+          <span>Bebas Kuota API: Gambar Semua Panel via Flow Connector (Nano Banana 2 Lite · 0 Kredit)</span>
+          <span className="statusBadge mono" data-tone={watchFolderName ? "ok" : undefined}>
+            {watchFolderName ? `Pantau Aktif: ${watchFolderName}` : "0 Kredit · ACC ≤10 Ref"}
+          </span>
+        </summary>
+
+        <div className="subtleDetailsBody animateAdvancedBody">
+          <div className="flowConnectorCard">
+            <div className="panelHead">
+              <div>
+                <strong>Susun Draft Teks Lalu Gambar Semua Panel di Google Flow (Tanpa Kuota API Gambar)</strong>
+                <p className="fieldHint" style={{ margin: "2px 0 0" }}>
+                  Nano Banana 2 Lite di Google Flow memakai <strong>0 kredit Flow</strong> (hingga 400 gambar/hari
+                  gratis) dan mendukung <strong>hingga 10 gambar acuan aset ACC</strong> per panel secara otomatis.
+                </p>
+              </div>
+              <a
+                href={ANIMATION_APP_LINKS.googleFlow}
+                target="_blank"
+                rel="noreferrer"
+                className="btn btnSm"
+              >
+                <ExternalLinkIcon size={13} />
+                <span>Buka Google Flow</span>
+              </a>
+            </div>
+
+            <label className="inlineControl" style={{ width: "100%", justifyContent: "space-between" }}>
+              <span className="fieldLabel">Model Gambar Google Flow:</span>
+              <select
+                className="select inputSm"
+                value={flowImageModel}
+                onChange={(e) => selectFlowImageModel(e.target.value as FlowConnectorImageModel)}
+                aria-label="Model gambar panel Google Flow Connector"
+              >
+                {FLOW_IMAGE_MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {remainingStats.drawnPanels > 0 && remainingStats.undrawnPanels > 0 ? (
+              <label className="inlineControl" style={{ cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={includeExistingFlow}
+                  onChange={(e) => setIncludeExistingFlow(e.target.checked)}
+                />
+                <span className="fieldHint">
+                  Sertakan panel yang sudah bergambar (total semua {orderedFrames.length} panel sebagai versi baru)
+                </span>
+              </label>
+            ) : null}
+
+            <ol className="flowConnectorSteps">
+              <li>
+                <strong>Susun draft teks semua panel (gratis, tanpa kuota gambar):</strong>{" "}
+                {remainingStats.unplannedPanels > 0 ? (
+                  <span>
+                    Masih ada <strong>{remainingStats.unplannedPanels} slot panel</strong> yang belum disusun draft
+                    adegannya. Klik tombol <strong>Susun Draft Semua Panel (Teks Saja)</strong> di bawah.
+                  </span>
+                ) : (
+                  <span>
+                    Semua <strong>{orderedFrames.length} draft panel</strong> sudah siap digambar!
+                  </span>
+                )}
+              </li>
+              <li>
+                <strong>Unduh &amp; jalankan skrip Flow Connector:</strong> Unduh paket ZIP (berisi semua gambar acuan
+                aset ACC di folder <code className="mono">refs/</code> + <code className="mono">run_flow_images</code>
+                ), ekstrak, lalu jalankan <code className="mono">run_flow_images.bat</code> /{" "}
+                <code className="mono">.command</code> / <code className="mono">node run_flow_images.mjs</code> saat
+                tab <strong>flow.google.com</strong> terbuka.
+                <div className="flowCodeChip">
+                  <code className="mono">{FLOW_CLI_INSTALL_CMD}</code>
+                  <button
+                    type="button"
+                    className="btn btnGhost btnSm"
+                    onClick={() => void handleCopyText(FLOW_CLI_INSTALL_CMD, "flow-cli-panels")}
+                  >
+                    {copyFeedback === "flow-cli-panels" ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
+                    <span>{copyFeedback === "flow-cli-panels" ? "Tersalin" : "Salin"}</span>
+                  </button>
+                </div>
+              </li>
+              <li>
+                <strong>Pasang gambar otomatis:</strong> Aktifkan <strong>Pantau Downloads</strong> di bawah (memantau{" "}
+                <code className="mono">Downloads/{flowFolderSlug}/</code>) atau klik{" "}
+                <strong>Unggah Banyak Gambar Panel</strong> sekaligus.
+              </li>
+            </ol>
+
+            <div className="actionGroup">
+              {remainingStats.unplannedPanels > 0 ? (
+                <button
+                  type="button"
+                  className="btn btnOk btnSm"
+                  disabled={Boolean(busy) || autoRunning}
+                  onClick={() => void handleAutoGenerateAllSegments({ onlySingleSegment: false, planOnly: true })}
+                  title="Susun seluruh draft teks panel (shot, dialog, prompt, aset ACC) tanpa memakai kuota gambar API"
+                >
+                  <SparklesIcon size={13} />
+                  <span>Susun Draft Semua Panel — Teks Saja ({remainingStats.unplannedPanels})</span>
+                </button>
+              ) : null}
+
+              <button
+                type="button"
+                className="btn btnPrimary btnSm"
+                disabled={orderedFrames.length === 0 || Boolean(busy) || autoRunning}
+                onClick={handleDownloadFlowPanelsZip}
+              >
+                <DownloadIcon size={13} />
+                <span>
+                  Unduh Paket Gambar Panel (
+                  {effectiveOnlyMissingPanels
+                    ? `${remainingStats.undrawnPanels} kosong`
+                    : `Semua ${orderedFrames.length}`}{" "}
+                  · .zip)
+                </span>
+              </button>
+
+              <button
+                type="button"
+                className="btn btnSm"
+                disabled={orderedFrames.length === 0 || Boolean(busy)}
+                onClick={() => batchPanelInputRef.current?.click()}
+                title="Pilih banyak gambar panel sekaligus untuk dipasang sesuai nomor urut"
+              >
+                <UploadIcon size={13} />
+                <span>Unggah Banyak Gambar Panel</span>
+              </button>
+
+              <button
+                type="button"
+                className="btn btnGhost btnSm"
+                disabled={orderedFrames.length === 0}
+                onClick={() => void handleCopyFlowPanelsAgentPrompt()}
+              >
+                {copyFeedback === "flow-panels-agent" ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+                <span>{copyFeedback === "flow-panels-agent" ? "Tersalin" : "Salin Prompt Agent"}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="flowWatchBox" data-active={Boolean(watchFolderName)}>
+            <div style={{ flex: "1 1 220px" }}>
+              <strong>
+                {watchFolderName
+                  ? `Pantau Otomatis Aktif: "${watchFolderName}" (+ ${flowFolderSlug})`
+                  : "Pantau Folder Downloads Otomatis (Chrome/Edge Desktop)"}
+              </strong>
+              <p className="fieldHint" style={{ margin: "3px 0 0" }}>
+                {watchFolderName
+                  ? `Memantau "${watchFolderName}/" dan "${watchFolderName}/${flowFolderSlug}/" tiap 2,5 detik. Gambar panel bernomor 1–${Math.max(1, orderedFrames.length)} otomatis masuk.`
+                  : folderWatchSupported
+                    ? `Pilih folder Downloads sekali saja agar hasil Nano Banana 2 Lite di Downloads/${flowFolderSlug}/ otomatis masuk ke tiap panel storyboard.`
+                    : "Browser HP tidak mendukung pantau folder otomatis. Gunakan tombol Unggah Banyak Gambar Panel."}
+              </p>
+            </div>
+            <div className="actionGroup">
+              {watchFolderName ? (
+                <>
+                  <button type="button" className="btn btnSm" onClick={() => void scanWatchedFolder()}>
+                    <RefreshIcon size={13} />
+                    <span>Pindai Sekarang</span>
+                  </button>
+                  <button type="button" className="btn btnGhost btnSm" onClick={handleStopFolderWatch}>
+                    Matikan
+                  </button>
+                </>
+              ) : folderWatchSupported ? (
+                <button
+                  type="button"
+                  className="btn btnOk btnSm"
+                  onClick={() => void handleEnableFolderWatch()}
+                >
+                  <RefreshIcon size={13} />
+                  <span>Aktifkan Pantau Downloads</span>
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </details>
 
       {autoRunning && autoProgress ? (
         <div className="autoProgressCard" role="status" aria-live="polite">

@@ -28,6 +28,15 @@ import {
   type FlowConnectorVideoModel,
   type OmniClipPlan,
 } from "@/lib/omniAnimation";
+import {
+  ANIMATIC_ATMOSPHERES,
+  ANIMATIC_SCORES,
+  drawAnimaticAtmosphere,
+  startBuiltInAnimaticScore,
+  type AnimaticAtmosphere,
+  type AnimaticScorePreset,
+  type BuiltInScoreController,
+} from "@/lib/animaticAudio";
 import { getSelectedFrameImage, getStoryboardSegments, reindexStoryboardFrames } from "@/lib/storyboard";
 import {
   CheckIcon,
@@ -200,19 +209,48 @@ export default function AnimateStep({
   const clipStatesRef = useRef<Record<string, RuntimeClipState>>(clipStates);
   clipStatesRef.current = clipStates;
 
-  // Browser Animatic state + optional BGM track
+  // Browser Cinema Animatic state + built-in 0-credit soundtrack & optional custom BGM track
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bgmInputRef = useRef<HTMLInputElement>(null);
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const scoreCtrlRef = useRef<BuiltInScoreController | null>(null);
+  const animAudioCtxRef = useRef<AudioContext | null>(null);
+  const lastSpokenPanelIdxRef = useRef<number>(-1);
   const [animPlaying, setAnimPlaying] = useState(false);
   const [animRecording, setAnimRecording] = useState(false);
   const [secPerPanel, setSecPerPanel] = useState(3.5);
   const [animProgress, setAnimProgress] = useState(0);
+  const [animAtmosphere, setAnimAtmosphere] = useState<AnimaticAtmosphere>(() => {
+    const text = `${project.name} ${sb.scriptText || ""}`.toLowerCase();
+    if (/\b(hujan|gerimis|badai|rain|drizzle)\b/.test(text)) return "rain";
+    if (/\b(salju|snow|winter)\b/.test(text)) return "snow";
+    if (/\b(kabut|subuh|embun|mist|fog)\b/.test(text)) return "mist";
+    if (/\b(senja|pagi|matahari|fajar|sore|golden|sunset|sunrise)\b/.test(text)) return "golden";
+    return "none";
+  });
+  const [animScore, setAnimScore] = useState<AnimaticScorePreset>(() => {
+    const text = `${project.name} ${sb.scriptText || ""}`.toLowerCase();
+    if (/\b(hujan|gerimis|badai|rain|drizzle)\b/.test(text)) return "rain_piano";
+    if (/\b(pagi|subuh|fajar|senja|kopi|morning|sunrise)\b/.test(text)) return "morning_warm";
+    return "cinematic_pad";
+  });
+  const [showTitleCard, setShowTitleCard] = useState(true);
+  const [showPanelBadge, setShowPanelBadge] = useState(false);
+  const [speakDialogue, setSpeakDialogue] = useState(false);
   const [bgmUrl, setBgmUrl] = useState("");
   const [bgmName, setBgmName] = useState("");
   const [bgmVolume, setBgmVolume] = useState(0.55);
   const animRafRef = useRef<number | null>(null);
   const animImagesRef = useRef<Array<{ frame: ReturnType<typeof reindexStoryboardFrames>[number]; segIdx: number; img: HTMLImageElement | null }>>([]);
+
+  const animAtmosphereRef = useRef<AnimaticAtmosphere>(animAtmosphere);
+  animAtmosphereRef.current = animAtmosphere;
+  const showTitleCardRef = useRef<boolean>(showTitleCard);
+  showTitleCardRef.current = showTitleCard;
+  const showPanelBadgeRef = useRef<boolean>(showPanelBadge);
+  showPanelBadgeRef.current = showPanelBadge;
+  const speakDialogueRef = useRef<boolean>(speakDialogue);
+  speakDialogueRef.current = speakDialogue;
 
   const segments = useMemo(() => getStoryboardSegments(sb), [sb]);
   const orderedFrames = useMemo(() => reindexStoryboardFrames(sb.frames, segments), [sb.frames, segments]);
@@ -268,12 +306,27 @@ export default function AnimateStep({
   const geminiKeyHint = resolvedGemini.hint;
   const omniKeyAvailable = Boolean(localGeminiKey || runtime?.serverKeys?.gemini);
 
-  // Revoke object URLs on unmount
+  // Revoke object URLs and clean up Cinema Animatic audio on unmount
   useEffect(() => {
     return () => {
       cancelRef.current = true;
       for (const u of blobUrlsRef.current) URL.revokeObjectURL(u);
       if (animRafRef.current) cancelAnimationFrame(animRafRef.current);
+      if (scoreCtrlRef.current) {
+        scoreCtrlRef.current.stop();
+        scoreCtrlRef.current = null;
+      }
+      if (animAudioCtxRef.current) {
+        void animAudioCtxRef.current.close().catch(() => {});
+        animAudioCtxRef.current = null;
+      }
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        try {
+          window.speechSynthesis.cancel();
+        } catch {
+          // ignore
+        }
+      }
     };
   }, []);
 
@@ -1349,7 +1402,7 @@ export default function AnimateStep({
     items: typeof animImagesRef.current,
     panelDur: number,
   ) => {
-    ctx.fillStyle = "#0b0d12";
+    ctx.fillStyle = "#080a0f";
     ctx.fillRect(0, 0, w, h);
     if (items.length === 0) return;
 
@@ -1357,18 +1410,45 @@ export default function AnimateStep({
     const t = Math.max(0, Math.min(elapsedSec, totalDur - 0.001));
     const idx = Math.min(items.length - 1, Math.floor(t / panelDur));
     const localT = (t - idx * panelDur) / panelDur; // 0..1
-    const fadeSec = Math.min(0.55, panelDur * 0.22);
+    const fadeSec = Math.min(0.6, panelDur * 0.22);
+
+    const smoothStep = (p: number) => 0.5 - 0.5 * Math.cos(Math.PI * Math.max(0, Math.min(1, p)));
 
     const renderCover = (im: HTMLImageElement, progress: number, modeIdx: number, alpha: number) => {
       ctx.save();
       ctx.globalAlpha = alpha;
-      const zoom = modeIdx % 2 === 0 ? 1.0 + progress * 0.075 : 1.075 - progress * 0.075;
-      const panX = ((modeIdx % 3) - 1) * (progress - 0.5) * 28;
+      const e = smoothStep(progress);
+      const pattern = modeIdx % 6;
+      const panLimitX = w * 0.022;
+      const panLimitY = h * 0.018;
+      let zoom = 1.07;
+      let panX = 0;
+      let panY = 0;
+
+      if (pattern === 0) {
+        zoom = 1.05 + e * 0.08;
+      } else if (pattern === 1) {
+        zoom = 1.13 - e * 0.075;
+        panX = (e - 0.5) * panLimitX * 1.3;
+      } else if (pattern === 2) {
+        zoom = 1.06 + e * 0.07;
+        panX = (0.5 - e) * panLimitX * 1.4;
+      } else if (pattern === 3) {
+        zoom = 1.06 + e * 0.07;
+        panY = (0.5 - e) * panLimitY * 1.4;
+      } else if (pattern === 4) {
+        zoom = 1.12 - e * 0.065;
+        panY = (e - 0.5) * panLimitY * 1.2;
+      } else {
+        zoom = 1.05 + e * 0.075;
+        panX = (e - 0.5) * panLimitX;
+      }
+
       const baseScale = Math.max(w / im.naturalWidth, h / im.naturalHeight) * zoom;
       const dw = im.naturalWidth * baseScale;
       const dh = im.naturalHeight * baseScale;
       const dx = (w - dw) / 2 + panX;
-      const dy = (h - dh) / 2;
+      const dy = (h - dh) / 2 + panY;
       ctx.drawImage(im, dx, dy, dw, dh);
       ctx.restore();
     };
@@ -1378,33 +1458,101 @@ export default function AnimateStep({
       renderCover(cur.img, localT, idx, 1);
     }
 
-    // Crossfade transition into next panel near the end of each panel
+    // Smooth crossfade transition into next panel near the end of each panel
     const remainingInPanel = (idx + 1) * panelDur - t;
     if (remainingInPanel < fadeSec && idx + 1 < items.length) {
       const next = items[idx + 1];
-      const mix = 1 - remainingInPanel / fadeSec;
+      const mix = smoothStep(1 - remainingInPanel / fadeSec);
       if (next.img) {
         renderCover(next.img, 0, idx + 1, Math.max(0, Math.min(1, mix)));
       }
     }
 
-    // Subtle top-left badge: SEGMEN 01 · PANEL 2
-    const pNum = cur.frame.panelNumber ?? idx + 1;
-    const badge = `SEGMEN ${String(cur.segIdx).padStart(2, "0")} · PANEL ${pNum}: ${(cur.frame.title || "").toUpperCase()}`;
-    ctx.save();
-    ctx.font = `700 ${Math.round(h * 0.025)}px system-ui, -apple-system, sans-serif`;
-    const bw = ctx.measureText(badge).width + 26;
-    const bh = Math.round(h * 0.052);
-    ctx.fillStyle = "rgba(11, 13, 18, 0.72)";
-    ctx.fillRect(20, 18, bw, bh);
-    ctx.fillStyle = "#f4ece0";
-    ctx.textBaseline = "middle";
-    ctx.fillText(badge, 33, 18 + bh / 2);
+    // Live animated atmosphere particles (rain / golden bokeh / twilight mist / snow)
+    drawAnimaticAtmosphere(ctx, w, h, t, animAtmosphereRef.current);
 
-    // Dialogue subtitle bar at bottom
+    // Subtle cinema edge vignette for anime film depth
+    ctx.save();
+    const vig = ctx.createRadialGradient(w * 0.5, h * 0.48, Math.min(w, h) * 0.34, w * 0.5, h * 0.5, Math.max(w, h) * 0.72);
+    vig.addColorStop(0, "rgba(0, 0, 0, 0)");
+    vig.addColorStop(1, "rgba(4, 7, 14, 0.34)");
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+
+    // Optional Cinema Opening Title Card (first 3.4s)
+    if (showTitleCardRef.current && totalDur >= 3.5 && t < 3.4) {
+      let cardAlpha = 1;
+      if (t < 0.85) cardAlpha = smoothStep(Math.max(0, (t - 0.15) / 0.7));
+      else if (t > 2.55) cardAlpha = 1 - smoothStep((t - 2.55) / 0.85);
+
+      if (cardAlpha > 0.01) {
+        ctx.save();
+        ctx.globalAlpha = cardAlpha;
+        const bandGrad = ctx.createLinearGradient(0, h * 0.28, 0, h * 0.68);
+        bandGrad.addColorStop(0, "rgba(7, 10, 18, 0)");
+        bandGrad.addColorStop(0.5, "rgba(7, 10, 18, 0.62)");
+        bandGrad.addColorStop(1, "rgba(7, 10, 18, 0)");
+        ctx.fillStyle = bandGrad;
+        ctx.fillRect(0, h * 0.28, w, h * 0.4);
+
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const kickerSize = Math.max(11, Math.round(h * 0.022));
+        ctx.font = `700 ${kickerSize}px system-ui, -apple-system, sans-serif`;
+        ctx.fillStyle = "#f2be6b";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
+        ctx.shadowBlur = 10;
+        ctx.fillText("NMCGEN CINEMA STORYBOARD", w / 2, h * 0.43);
+
+        const titleSize = Math.max(22, Math.round(h * 0.062));
+        ctx.font = `700 ${titleSize}px Georgia, "Times New Roman", serif`;
+        ctx.fillStyle = "#ffffff";
+        const titleWords = (project.name || "Proyek nmcGen").trim().split(/\s+/);
+        const titleLines: string[] = [];
+        let tLine = "";
+        for (const wd of titleWords) {
+          const cand = tLine ? `${tLine} ${wd}` : wd;
+          if (ctx.measureText(cand).width > w * 0.82 && tLine) {
+            titleLines.push(tLine);
+            tLine = wd;
+          } else {
+            tLine = cand;
+          }
+        }
+        if (tLine) titleLines.push(tLine);
+        const lineStep = Math.round(titleSize * 1.18);
+        titleLines.slice(0, 2).forEach((ln, li) => {
+          ctx.fillText(ln, w / 2, h * 0.51 + li * lineStep);
+        });
+        ctx.restore();
+      }
+    }
+
+    ctx.save();
+    // Optional top-left panel badge (off by default for clean cinema film look)
+    if (showPanelBadgeRef.current) {
+      const pNum = cur.frame.panelNumber ?? idx + 1;
+      const badge = `SEGMEN ${String(cur.segIdx).padStart(2, "0")} · PANEL ${pNum}: ${(cur.frame.title || "").toUpperCase()}`;
+      ctx.font = `700 ${Math.round(h * 0.023)}px system-ui, -apple-system, sans-serif`;
+      const bw = Math.min(w - 36, ctx.measureText(badge).width + 24);
+      const bh = Math.round(h * 0.048);
+      ctx.fillStyle = "rgba(10, 12, 18, 0.68)";
+      ctx.fillRect(18, 16, bw, bh);
+      ctx.fillStyle = "#f4ece0";
+      ctx.textBaseline = "middle";
+      ctx.fillText(badge, 30, 16 + bh / 2, bw - 22);
+    }
+
+    // Clean Cinema Film Subtitle at bottom (soft gradient scrim + crisp outlined white text)
     const dlg = cur.frame.dialogue.trim();
     if (dlg) {
-      const fontSize = Math.round(h * 0.032);
+      let subAlpha = 1;
+      if (localT < 0.08) subAlpha = localT / 0.08;
+      else if (remainingInPanel < fadeSec * 0.8) subAlpha = Math.max(0, remainingInPanel / (fadeSec * 0.8));
+
+      ctx.globalAlpha = Math.max(0, Math.min(1, subAlpha));
+      const fontSize = Math.max(15, Math.round(h * 0.036));
       ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
       const maxWidth = w * 0.84;
       const words = dlg.split(/\s+/);
@@ -1421,35 +1569,65 @@ export default function AnimateStep({
       }
       if (line) wrapped.push(line);
 
-      const lineH = Math.round(fontSize * 1.38);
-      const boxH = wrapped.length * lineH + 22;
-      const boxY = h - boxH - 28;
-      ctx.fillStyle = "rgba(10, 12, 16, 0.78)";
-      ctx.fillRect(w * 0.06, boxY, w * 0.88, boxH);
-      ctx.fillStyle = "#ffffff";
+      const lineH = Math.round(fontSize * 1.36);
+      const blockH = wrapped.length * lineH;
+      const scrimTop = h - blockH - Math.round(h * 0.14);
+      const scrim = ctx.createLinearGradient(0, scrimTop, 0, h);
+      scrim.addColorStop(0, "rgba(6, 8, 14, 0)");
+      scrim.addColorStop(0.55, "rgba(6, 8, 14, 0.54)");
+      scrim.addColorStop(1, "rgba(6, 8, 14, 0.76)");
+      ctx.fillStyle = scrim;
+      ctx.fillRect(0, scrimTop, w, h - scrimTop);
+
       ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = Math.max(3, Math.round(h * 0.008));
+      ctx.strokeStyle = "rgba(6, 8, 14, 0.9)";
+      ctx.shadowColor = "rgba(0, 0, 0, 0.78)";
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = "#ffffff";
+
+      const baseY = h - Math.round(h * 0.055) - (wrapped.length - 1) * lineH;
       wrapped.forEach((ln, li) => {
-        ctx.fillText(ln, w / 2, boxY + 14 + li * lineH + lineH * 0.45);
+        const y = baseY + li * lineH;
+        ctx.strokeText(ln, w / 2, y);
+        ctx.fillText(ln, w / 2, y);
       });
     }
     ctx.restore();
+
+    // Smooth film fade-in from black (0.7s) & fade-out to black (1.0s)
+    const fadeInDur = Math.min(0.7, totalDur * 0.15);
+    const fadeOutDur = Math.min(1.0, totalDur * 0.2);
+    let blackAlpha = 0;
+    if (t < fadeInDur) {
+      blackAlpha = 1 - t / fadeInDur;
+    } else if (totalDur - t < fadeOutDur) {
+      blackAlpha = 1 - (totalDur - t) / fadeOutDur;
+    }
+    if (blackAlpha > 0.005) {
+      ctx.fillStyle = `rgba(4, 6, 10, ${Math.max(0, Math.min(1, blackAlpha)).toFixed(3)})`;
+      ctx.fillRect(0, 0, w, h);
+    }
   };
 
-  // Draw initial static preview when entering Animatic tab
+  // Draw static preview whenever entering Animatic tab or toggling atmosphere / title / badge
   useEffect(() => {
-    if (engineTab !== "animatic" || renderedFrames.length === 0) return;
+    if (engineTab !== "animatic" || renderedFrames.length === 0 || animPlaying || animRecording) return;
     let active = true;
     void loadAnimaticImages().then((items) => {
       if (!active || !canvasRef.current) return;
       const ctx = canvasRef.current.getContext("2d");
       if (!ctx) return;
-      drawAnimaticFrame(ctx, canvasRef.current.width, canvasRef.current.height, 0, items, secPerPanel);
+      const previewSec = Math.min(items.length * secPerPanel * 0.35, showTitleCard ? 1.45 : 1.0);
+      drawAnimaticFrame(ctx, canvasRef.current.width, canvasRef.current.height, previewSec, items, secPerPanel);
     });
     return () => {
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engineTab, renderedFrames.length, sb.aspectRatio]);
+  }, [engineTab, renderedFrames.length, sb.aspectRatio, animAtmosphere, showTitleCard, showPanelBadge, secPerPanel]);
 
   const stopAnimatic = () => {
     if (animRafRef.current) {
@@ -1459,6 +1637,22 @@ export default function AnimateStep({
     if (bgmAudioRef.current) {
       bgmAudioRef.current.pause();
       bgmAudioRef.current.currentTime = 0;
+    }
+    if (scoreCtrlRef.current) {
+      scoreCtrlRef.current.stop();
+      scoreCtrlRef.current = null;
+    }
+    if (animAudioCtxRef.current) {
+      void animAudioCtxRef.current.close().catch(() => {});
+      animAudioCtxRef.current = null;
+    }
+    lastSpokenPanelIdxRef.current = -1;
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
     }
     setAnimPlaying(false);
   };
@@ -1476,7 +1670,7 @@ export default function AnimateStep({
     let audioCtx: AudioContext | null = null;
     const chunks: BlobPart[] = [];
 
-    // Prepare optional BGM playback / mixing
+    // Prepare audio: custom uploaded BGM takes precedence; otherwise built-in 0-credit Web Audio soundtrack
     let audioEl: HTMLAudioElement | null = null;
     if (bgmUrl) {
       audioEl = new Audio(bgmUrl);
@@ -1484,6 +1678,9 @@ export default function AnimateStep({
       audioEl.volume = bgmVolume;
       bgmAudioRef.current = audioEl;
     }
+
+    const useBuiltInScore = !audioEl && animScore !== "none";
+    let mediaAudioDest: MediaStreamAudioDestinationNode | null = null;
 
     if (recordWebm) {
       if (typeof MediaRecorder === "undefined" || typeof canvas.captureStream !== "function") {
@@ -1493,18 +1690,32 @@ export default function AnimateStep({
       const videoStream = canvas.captureStream(30);
       let combinedStream: MediaStream = videoStream;
 
-      if (audioEl) {
+      if (audioEl || useBuiltInScore) {
         audioCtx = new AudioContext();
-        const src = audioCtx.createMediaElementSource(audioEl);
-        const gain = audioCtx.createGain();
-        gain.gain.value = bgmVolume;
-        const dest = audioCtx.createMediaStreamDestination();
-        src.connect(gain);
-        gain.connect(dest);
-        gain.connect(audioCtx.destination);
+        await audioCtx.resume().catch(() => {});
+        animAudioCtxRef.current = audioCtx;
+        mediaAudioDest = audioCtx.createMediaStreamDestination();
+
+        if (audioEl) {
+          const src = audioCtx.createMediaElementSource(audioEl);
+          const gain = audioCtx.createGain();
+          gain.gain.value = bgmVolume;
+          src.connect(gain);
+          gain.connect(mediaAudioDest);
+          gain.connect(audioCtx.destination);
+        } else if (useBuiltInScore) {
+          scoreCtrlRef.current = startBuiltInAnimaticScore(
+            audioCtx,
+            [mediaAudioDest, audioCtx.destination],
+            animScore,
+            totalDur,
+            bgmVolume,
+          );
+        }
+
         combinedStream = new MediaStream([
           ...videoStream.getVideoTracks(),
-          ...dest.stream.getAudioTracks(),
+          ...mediaAudioDest.stream.getAudioTracks(),
         ]);
       }
 
@@ -1513,30 +1724,49 @@ export default function AnimateStep({
         : MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
           ? "video/webm;codecs=vp9"
           : "video/webm";
-      recorder = new MediaRecorder(combinedStream, { mimeType: mime, videoBitsPerSecond: 4_500_000 });
+      recorder = new MediaRecorder(combinedStream, { mimeType: mime, videoBitsPerSecond: 5_000_000 });
       recorder.ondataavailable = (ev) => {
         if (ev.data.size > 0) chunks.push(ev.data);
       };
+      const scoreMeta = ANIMATIC_SCORES.find((s) => s.value === animScore);
+      const audioLabel = bgmName ? " + Musik" : useBuiltInScore ? ` + ${scoreMeta?.label.split(" (")[0] || "Musik"}` : "";
       recorder.onstop = () => {
         const blob = new Blob(chunks, { type: "video/webm" });
         const safeName =
           (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
-          "-animatic.webm";
+          "-cinema-animatic.webm";
         downloadBlob(blob, safeName);
         setAnimRecording(false);
-        if (audioCtx) void audioCtx.close().catch(() => {});
-        setGlobalNotice(
-          `Animatic WebM (${totalDur.toFixed(1)} dtk${bgmName ? " + BGM" : ""}) berhasil diunduh.`,
-        );
+        if (scoreCtrlRef.current) {
+          scoreCtrlRef.current.stop();
+          scoreCtrlRef.current = null;
+        }
+        if (audioCtx) {
+          void audioCtx.close().catch(() => {});
+          if (animAudioCtxRef.current === audioCtx) animAudioCtxRef.current = null;
+        }
+        setGlobalNotice(`Cinema Animatic WebM (${totalDur.toFixed(1)} dtk${audioLabel}) berhasil diunduh!`);
       };
       setAnimRecording(true);
       recorder.start();
+    } else if (useBuiltInScore) {
+      audioCtx = new AudioContext();
+      await audioCtx.resume().catch(() => {});
+      animAudioCtxRef.current = audioCtx;
+      scoreCtrlRef.current = startBuiltInAnimaticScore(
+        audioCtx,
+        [audioCtx.destination],
+        animScore,
+        totalDur,
+        bgmVolume,
+      );
     }
 
     if (audioEl) {
       void audioEl.play().catch(() => {});
     }
 
+    lastSpokenPanelIdxRef.current = -1;
     setAnimPlaying(true);
     const startTs = performance.now();
 
@@ -1545,6 +1775,27 @@ export default function AnimateStep({
       const pct = Math.min(100, (elapsed / totalDur) * 100);
       setAnimProgress(pct);
       drawAnimaticFrame(ctx, canvas.width, canvas.height, elapsed, items, secPerPanel);
+
+      // Optional live Indonesian SpeechSynthesis voiceover preview per panel
+      if (!recordWebm && speakDialogueRef.current && typeof window !== "undefined" && "speechSynthesis" in window) {
+        const curIdx = Math.min(items.length - 1, Math.floor(Math.max(0, elapsed) / secPerPanel));
+        if (curIdx !== lastSpokenPanelIdxRef.current) {
+          lastSpokenPanelIdxRef.current = curIdx;
+          const dlg = items[curIdx]?.frame.dialogue.trim();
+          try {
+            window.speechSynthesis.cancel();
+            if (dlg) {
+              const utter = new SpeechSynthesisUtterance(dlg);
+              utter.lang = "id-ID";
+              utter.rate = 0.96;
+              window.speechSynthesis.speak(utter);
+            }
+          } catch {
+            // ignore SpeechSynthesis errors
+          }
+        }
+      }
+
       if (elapsed >= totalDur) {
         setAnimPlaying(false);
         animRafRef.current = null;
@@ -1552,7 +1803,18 @@ export default function AnimateStep({
           audioEl.pause();
           audioEl.currentTime = 0;
         }
-        if (recorder && recorder.state !== "inactive") recorder.stop();
+        if (recorder && recorder.state !== "inactive") {
+          recorder.stop();
+        } else {
+          if (scoreCtrlRef.current) {
+            scoreCtrlRef.current.stop();
+            scoreCtrlRef.current = null;
+          }
+          if (audioCtx) {
+            void audioCtx.close().catch(() => {});
+            if (animAudioCtxRef.current === audioCtx) animAudioCtxRef.current = null;
+          }
+        }
         return;
       }
       animRafRef.current = requestAnimationFrame(tick);
@@ -1664,10 +1926,10 @@ export default function AnimateStep({
               onClick={() => selectEngineTab("animatic")}
             >
               <div className="animateEngineTop">
-                <strong>Preview di Browser</strong>
-                <span className="metaTag mono">Gratis · 1 Klik</span>
+                <strong>Cinema Animatic (0 Kredit)</strong>
+                <span className="metaTag mono" data-tone="ok">Gratis · 0 Kredit</span>
               </div>
-              <span>Putar dan unduh animatic langsung tanpa akun tambahan.</span>
+              <span>Efek hujan/cahaya, musik piano bawaan, &amp; ekspor WebM langsung di browser.</span>
             </button>
           </div>
 
@@ -2592,19 +2854,37 @@ export default function AnimateStep({
           ) : null}
 
           {/* =============================================================== */}
-          {/* TAB 3: FREE IN-BROWSER ANIMATIC REEL + BGM + WEBM EXPORT        */}
+          {/* TAB 3: FREE IN-BROWSER CINEMA ANIMATIC (0 KREDIT + AUDIO WEBM)  */}
           {/* =============================================================== */}
           {engineTab === "animatic" ? (
             <section className="panelCard animaticCard">
               <div className="panelHead">
                 <div>
-                  <h3>Preview di Browser ({renderedFrames.length} Panel)</h3>
+                  <h3>Cinema Animatic ({renderedFrames.length} Panel · 0 Kredit)</h3>
                   <p className="fieldHint">
-                    Putar animatic dengan gerak kamera dan subtitle, lalu unduh sebagai WebM tanpa akun tambahan.
+                    Gaya film anime langsung di browser dengan gerak kamera sinematik, efek atmosfer, musik latar bawaan,
+                    dan ekspor video WebM beraudio.
                   </p>
                 </div>
 
                 <div className="actionGroup">
+                  <label className="inlineControl">
+                    <span className="fieldLabel">Musik Bawaan:</span>
+                    <select
+                      className="select inputSm"
+                      value={bgmName ? "none" : animScore}
+                      disabled={animPlaying || animRecording || Boolean(bgmName)}
+                      onChange={(e) => setAnimScore(e.target.value as AnimaticScorePreset)}
+                      aria-label="Pilih musik latar bawaan 0 kredit"
+                    >
+                      {ANIMATIC_SCORES.map((sc) => (
+                        <option key={sc.value} value={sc.value}>
+                          {sc.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
                   <label className="inlineControl">
                     <span className="fieldLabel">Durasi/Panel:</span>
                     <select
@@ -2613,60 +2893,55 @@ export default function AnimateStep({
                       disabled={animPlaying || animRecording}
                       onChange={(e) => setSecPerPanel(Number(e.target.value))}
                     >
-                      <option value={2.5}>2,5 detik (Cepat)</option>
-                      <option value={3.5}>3,5 detik (Standar)</option>
-                      <option value={5}>5,0 detik (Santai)</option>
+                      <option value={2.5}>2,5 dtk (Cepat)</option>
+                      <option value={3.5}>3,5 dtk (Standar)</option>
+                      <option value={5}>5,0 dtk (Sinematik)</option>
                     </select>
                   </label>
-
-                  <button
-                    type="button"
-                    className="btn btnSm"
-                    disabled={animPlaying || animRecording}
-                    onClick={() => bgmInputRef.current?.click()}
-                  >
-                    <UploadIcon size={13} />
-                    <span>{bgmName ? "Ganti Musik" : "+ Musik Latar"}</span>
-                  </button>
-                  <input
-                    ref={bgmInputRef}
-                    type="file"
-                    accept="audio/*"
-                    className="srOnly"
-                    onChange={handleUploadBgm}
-                  />
                 </div>
               </div>
+
+              {/* Atmosphere quick pills */}
+              <div className="animaticOptionRow">
+                <span className="fieldLabel">Atmosfer:</span>
+                <div className="segToggle" role="group" aria-label="Pilih efek atmosfer animatic">
+                  {ANIMATIC_ATMOSPHERES.map((atm) => (
+                    <button
+                      key={atm.value}
+                      type="button"
+                      className="segBtn"
+                      aria-selected={animAtmosphere === atm.value}
+                      disabled={animRecording}
+                      onClick={() => setAnimAtmosphere(atm.value)}
+                    >
+                      {atm.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <input
+                ref={bgmInputRef}
+                type="file"
+                accept="audio/*"
+                className="srOnly"
+                onChange={handleUploadBgm}
+              />
 
               {bgmName ? (
                 <div className="toolbarCard" style={{ padding: "8px 12px" }}>
                   <div className="metaInline">
-                    <span className="metaTag mono">Musik Aktif</span>
+                    <span className="metaTag mono" data-tone="ok">Audio Kustom</span>
                     <strong style={{ fontSize: 12.5 }}>{bgmName}</strong>
                   </div>
                   <div className="actionGroup">
-                    <label className="inlineControl">
-                      <span className="fieldHint">Volume ({Math.round(bgmVolume * 100)}%)</span>
-                      <input
-                        type="range"
-                        min={0.05}
-                        max={1}
-                        step={0.05}
-                        value={bgmVolume}
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
-                          setBgmVolume(v);
-                          if (bgmAudioRef.current) bgmAudioRef.current.volume = v;
-                        }}
-                      />
-                    </label>
                     <button
                       type="button"
                       className="btn btnGhost btnSm"
                       disabled={animPlaying || animRecording}
                       onClick={handleClearBgm}
                     >
-                      Hapus Musik
+                      Pakai Musik Bawaan
                     </button>
                   </div>
                 </div>
@@ -2674,7 +2949,7 @@ export default function AnimateStep({
 
               {renderedFrames.length === 0 ? (
                 <div className="emptyPanel">
-                  <p>Buat minimal 1 gambar panel di Tahap 3 untuk memutar preview di browser.</p>
+                  <p>Buat minimal 1 gambar panel di Tahap 3 untuk memutar Cinema Animatic di browser.</p>
                 </div>
               ) : (
                 <>
@@ -2704,7 +2979,7 @@ export default function AnimateStep({
                         onClick={() => void runAnimaticPlayback(false)}
                       >
                         <PlayIcon size={14} />
-                        <span>Putar Preview ({(renderedFrames.length * secPerPanel).toFixed(1)} dtk)</span>
+                        <span>Putar Cinema Preview ({(renderedFrames.length * secPerPanel).toFixed(1)} dtk)</span>
                       </button>
                     )}
 
@@ -2717,11 +2992,85 @@ export default function AnimateStep({
                       <DownloadIcon size={14} />
                       <span>
                         {animRecording
-                          ? "Merekam WebM..."
-                          : `Unduh Video (.webm${bgmName ? " + Musik" : ""})`}
+                          ? "Merekam Video WebM..."
+                          : `Unduh Video (.webm${bgmName || animScore !== "none" ? " + Audio" : ""})`}
                       </span>
                     </button>
                   </div>
+
+                  {/* Collapsible Cinema details: Title card, panel badge, volume, voiceover & custom MP3 */}
+                  <details className="subtleDetails animateCompactDetails">
+                    <summary className="animateDetailsSummary">
+                      <span>Opsi Cinema: Judul Pembuka, Volume Audio, Suara Dialog &amp; MP3 Kustom</span>
+                      <span className="metaTag mono">Volume {Math.round(bgmVolume * 100)}%</span>
+                    </summary>
+
+                    <div className="subtleDetailsBody animaticAdvancedBody">
+                      <div className="animaticToggleRow">
+                        <label className="inlineControl" style={{ cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={showTitleCard}
+                            disabled={animRecording}
+                            onChange={(e) => setShowTitleCard(e.target.checked)}
+                          />
+                          <span>Kartu Judul Pembuka</span>
+                        </label>
+
+                        <label className="inlineControl" style={{ cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={showPanelBadge}
+                            disabled={animRecording}
+                            onChange={(e) => setShowPanelBadge(e.target.checked)}
+                          />
+                          <span>Label Nomor Panel</span>
+                        </label>
+
+                        <label
+                          className="inlineControl"
+                          style={{ cursor: "pointer" }}
+                          title="Bacakan dialog Indonesia lewat suara browser saat Putar Preview (tidak terekam ke berkas WebM)"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={speakDialogue}
+                            onChange={(e) => setSpeakDialogue(e.target.checked)}
+                          />
+                          <span>Suara Dialog ID (Pratinjau Live)</span>
+                        </label>
+                      </div>
+
+                      <div className="animaticOptionRow">
+                        <label className="inlineControl">
+                          <span className="fieldLabel">Volume Musik ({Math.round(bgmVolume * 100)}%):</span>
+                          <input
+                            type="range"
+                            min={0.05}
+                            max={1}
+                            step={0.05}
+                            value={bgmVolume}
+                            onChange={(e) => {
+                              const v = Number(e.target.value);
+                              setBgmVolume(v);
+                              if (bgmAudioRef.current) bgmAudioRef.current.volume = v;
+                              if (scoreCtrlRef.current) scoreCtrlRef.current.setVolume(v);
+                            }}
+                          />
+                        </label>
+
+                        <button
+                          type="button"
+                          className="btn btnSm"
+                          disabled={animPlaying || animRecording}
+                          onClick={() => bgmInputRef.current?.click()}
+                        >
+                          <UploadIcon size={13} />
+                          <span>{bgmName ? "Ganti MP3/WAV Kustom" : "+ Unggah MP3/WAV Sendiri"}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </details>
                 </>
               )}
             </section>
