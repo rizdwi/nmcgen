@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -56,14 +56,43 @@ export function defaultCapCutDraftsDir(): string {
   return path.join(os.homedir(), "CapCutDrafts");
 }
 
+export async function findChromeBin(): Promise<string | null> {
+  if (isServerlessRuntime()) return null;
+  const candidates =
+    process.platform === "win32"
+      ? [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+          "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+        ]
+      : process.platform === "darwin"
+        ? [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+          ]
+        : ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
+
+  for (const p of candidates) {
+    try {
+      await access(p);
+      return p;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
 export async function detectRuntime(): Promise<RuntimeStatus> {
   const isServerless = isServerlessRuntime();
-  const [ff, fp, pyBin] = isServerless
-    ? [{ ok: false, stdout: "" }, { ok: false, stdout: "" }, null]
+  const [ff, fp, pyBin, chromeBin] = isServerless
+    ? [{ ok: false, stdout: "" }, { ok: false, stdout: "" }, null, null]
     : await Promise.all([
         probeCmd("ffmpeg", ["-version"]),
         probeCmd("ffprobe", ["-version"]),
         findPythonBin(),
+        findChromeBin(),
       ]);
 
   let localPyCapCut = false;
@@ -97,6 +126,7 @@ export async function detectRuntime(): Promise<RuntimeStatus> {
     localFfprobe: fp.ok,
     localPython: Boolean(pyBin),
     localPyCapCut,
+    localChrome: Boolean(chromeBin),
     ffmpegVersion: ff.ok ? ff.stdout.split(/\r?\n/)[0]?.slice(0, 80) : undefined,
     defaultCapCutDir: isServerless ? undefined : defaultCapCutDraftsDir(),
     supabaseConnected: Boolean(supabaseCfg),
@@ -110,19 +140,20 @@ export async function detectRuntime(): Promise<RuntimeStatus> {
   };
 }
 
-export async function readBundledScripts(): Promise<{ renderPy: string; capcutPy: string }> {
+export async function readBundledScripts(): Promise<{ renderPy: string; capcutPy: string; motionCdpPy: string }> {
   if (isServerlessRuntime()) {
-    return { renderPy: "", capcutPy: "" };
+    return { renderPy: "", capcutPy: "", motionCdpPy: "" };
   }
   try {
     const scriptsDir = path.resolve(process.cwd(), "public", "scripts");
-    const [renderPy, capcutPy] = await Promise.all([
+    const [renderPy, capcutPy, motionCdpPy] = await Promise.all([
       readFile(path.join(scriptsDir, "render_ffmpeg.py"), "utf-8"),
       readFile(path.join(scriptsDir, "build_capcut_draft.py"), "utf-8"),
+      readFile(path.join(scriptsDir, "render_motion_cdp.py"), "utf-8").catch(() => ""),
     ]);
-    return { renderPy, capcutPy };
+    return { renderPy, capcutPy, motionCdpPy };
   } catch {
-    return { renderPy: "", capcutPy: "" };
+    return { renderPy: "", capcutPy: "", motionCdpPy: "" };
   }
 }
 

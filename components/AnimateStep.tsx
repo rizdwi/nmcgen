@@ -39,6 +39,19 @@ import {
 } from "@/lib/animaticAudio";
 import { getSelectedFrameImage, getStoryboardSegments, reindexStoryboardFrames } from "@/lib/storyboard";
 import {
+  buildLocalCdpStoryboardSpec,
+  buildLocalMotionRenderPackZip,
+  buildMotionTimeline,
+  drawMotionFrame,
+  MOTION_PRESET_OPTIONS,
+  pickBrowserVideoMime,
+  sampleMotionTimeline,
+  TRANSITION_PRESET_OPTIONS,
+  type MotionFitMode,
+  type MotionPreset,
+  type TransitionPreset,
+} from "@/lib/motionEngine";
+import {
   CheckIcon,
   CopyIcon,
   DownloadIcon,
@@ -124,14 +137,14 @@ function findSavedGeminiProfileKey(profiles?: ProviderProfile[]): { key: string;
 }
 
 function loadPreferredEngineTab(): EngineTab {
-  if (typeof window === "undefined") return "handoff";
+  if (typeof window === "undefined") return "animatic";
   try {
     const saved = window.localStorage.getItem(ANIM_ENGINE_STORAGE_KEY);
     if (saved === "handoff" || saved === "omni-api" || saved === "animatic") return saved;
   } catch {
     // ignore storage errors
   }
-  return "handoff";
+  return "animatic";
 }
 
 function loadPreferredFlowModel(): FlowConnectorVideoModel {
@@ -209,17 +222,30 @@ export default function AnimateStep({
   const clipStatesRef = useRef<Record<string, RuntimeClipState>>(clipStates);
   clipStatesRef.current = clipStates;
 
-  // Browser Cinema Animatic state + built-in 0-credit soundtrack & optional custom BGM track
+  // Browser Cinema Animatic + Local Motion MP4 state
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const offFromRef = useRef<HTMLCanvasElement | null>(null);
+  const offToRef = useRef<HTMLCanvasElement | null>(null);
   const bgmInputRef = useRef<HTMLInputElement>(null);
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const bgmFileRef = useRef<File | null>(null);
   const scoreCtrlRef = useRef<BuiltInScoreController | null>(null);
   const animAudioCtxRef = useRef<AudioContext | null>(null);
   const lastSpokenPanelIdxRef = useRef<number>(-1);
   const [animPlaying, setAnimPlaying] = useState(false);
   const [animRecording, setAnimRecording] = useState(false);
+  const [motionSegmentId, setMotionSegmentId] = useState<string>("all");
   const [secPerPanel, setSecPerPanel] = useState(3.5);
+  const [motionPreset, setMotionPreset] = useState<MotionPreset>("auto");
+  const [transitionPreset, setTransitionPreset] = useState<TransitionPreset>("auto");
+  const [fitMode, setFitMode] = useState<MotionFitMode>("cover");
+  const [animElapsedSec, setAnimElapsedSec] = useState(0);
   const [animProgress, setAnimProgress] = useState(0);
+  const [localMp4Busy, setLocalMp4Busy] = useState(false);
+  const [localMp4Url, setLocalMp4Url] = useState("");
+  const [localMp4Blob, setLocalMp4Blob] = useState<Blob | null>(null);
+  const [localMp4Meta, setLocalMp4Meta] = useState("");
+  const [localPackBusy, setLocalPackBusy] = useState(false);
   const [animAtmosphere, setAnimAtmosphere] = useState<AnimaticAtmosphere>(() => {
     const text = `${project.name} ${sb.scriptText || ""}`.toLowerCase();
     if (/\b(hujan|gerimis|badai|rain|drizzle)\b/.test(text)) return "rain";
@@ -241,7 +267,7 @@ export default function AnimateStep({
   const [bgmName, setBgmName] = useState("");
   const [bgmVolume, setBgmVolume] = useState(0.55);
   const animRafRef = useRef<number | null>(null);
-  const animImagesRef = useRef<Array<{ frame: ReturnType<typeof reindexStoryboardFrames>[number]; segIdx: number; img: HTMLImageElement | null }>>([]);
+  const animImageMapRef = useRef<Map<string, HTMLImageElement | null>>(new Map());
 
   const animAtmosphereRef = useRef<AnimaticAtmosphere>(animAtmosphere);
   animAtmosphereRef.current = animAtmosphere;
@@ -1179,9 +1205,23 @@ export default function AnimateStep({
     onConsumeAutoAnimate?.();
   }, [autoAnimateSegmentId, onConsumeAutoAnimate]);
 
-  // Focus target segment (auto-launch Omni API if user is on Omni API tab, OR arm Flow Express card on Flow tab!)
+  // Focus target segment across active tab (Local Motion Engine, Google Flow, or Omni API)
   useEffect(() => {
-    if (!pendingSegmentId || mode !== "segment") return;
+    if (!pendingSegmentId) return;
+
+    if (engineTab === "animatic") {
+      setMotionSegmentId(pendingSegmentId);
+      setPendingSegmentId(null);
+      const segObj = segments.find((s) => s.id === pendingSegmentId);
+      setGlobalNotice(
+        segObj
+          ? `Segmen ${String(segObj.index).padStart(2, "0")} (${segObj.title}) dipilih di Mesin Render Lokal. Klik Putar atau Render MP4 1080p.`
+          : "Segmen dipilih di Mesin Render Lokal.",
+      );
+      return;
+    }
+
+    if (mode !== "segment") return;
     const targetPlan = plans.find((p) => p.segmentId === pendingSegmentId);
     if (!targetPlan) return;
 
@@ -1352,17 +1392,54 @@ export default function AnimateStep({
   };
 
   // =========================================================================
-  // BROWSER ANIMATIC ENGINE (100% Free Client-Side Cinema Reel + BGM + WebM)
+  // CINEMA ANIMATIC + LOCAL CHROME CDP/FFMPEG MP4 ENGINE (ZERO VEO / FLOW)
   // =========================================================================
+  const motionOptions = useMemo(
+    () => ({
+      segmentId: motionSegmentId === "all" ? null : motionSegmentId,
+      secPerPanel,
+      transitionSec: Math.min(0.55, secPerPanel * 0.22),
+      motionPreset,
+      motionAmount: 0.11,
+      transitionPreset,
+      fitMode,
+      showBadge: showPanelBadge,
+      showSubtitles: true,
+      showProgress: true,
+      fps: 30,
+      audioMode: bgmName ? ("bgm" as const) : animScore === "none" ? ("none" as const) : ("synth" as const),
+      audioVolume: bgmVolume,
+    }),
+    [motionSegmentId, secPerPanel, motionPreset, transitionPreset, fitMode, showPanelBadge, bgmName, animScore, bgmVolume],
+  );
+
+  const motionTimeline = useMemo(
+    () =>
+      buildMotionTimeline(
+        { ...project, storyboard: { ...sb, segments, frames: orderedFrames } },
+        motionOptions,
+      ),
+    [project, sb, segments, orderedFrames, motionOptions],
+  );
+
+  const localCdpReady = Boolean(runtime?.mode === "local-hybrid" && runtime?.localChrome);
+
+  const ensureOffscreenCanvases = () => {
+    if (!offFromRef.current) offFromRef.current = document.createElement("canvas");
+    if (!offToRef.current) offToRef.current = document.createElement("canvas");
+    return { offFrom: offFromRef.current, offTo: offToRef.current };
+  };
+
   const handleUploadBgm = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (bgmUrl) URL.revokeObjectURL(bgmUrl);
     const url = URL.createObjectURL(file);
     blobUrlsRef.current.push(url);
+    bgmFileRef.current = file;
     setBgmUrl(url);
     setBgmName(file.name);
-    setGlobalNotice(`Musik latar "${file.name}" dipasang untuk Animatic.`);
+    setGlobalNotice(`Musik latar "${file.name}" dipasang untuk Mesin Render Lokal.`);
     e.target.value = "";
   };
 
@@ -1371,27 +1448,27 @@ export default function AnimateStep({
       bgmAudioRef.current.pause();
       bgmAudioRef.current = null;
     }
+    bgmFileRef.current = null;
     setBgmUrl("");
     setBgmName("");
   };
 
   const loadAnimaticImages = async () => {
-    const loaded = await Promise.all(
-      renderedFrames.map(
-        (frame) =>
-          new Promise<{ frame: typeof frame; segIdx: number; img: HTMLImageElement | null }>((resolve) => {
-            const url = getSelectedFrameImage(frame);
-            const segIdx = Math.max(1, segments.findIndex((s) => s.id === frame.segmentId) + 1);
-            if (!url) return resolve({ frame, segIdx, img: null });
+    const entries = await Promise.all(
+      motionTimeline.slides.map(
+        (slide) =>
+          new Promise<[string, HTMLImageElement | null]>((resolve) => {
+            if (!slide.imageUrl) return resolve([slide.frameId, null]);
             const img = new Image();
-            img.onload = () => resolve({ frame, segIdx, img });
-            img.onerror = () => resolve({ frame, segIdx, img: null });
-            img.src = url;
+            img.onload = () => resolve([slide.frameId, img]);
+            img.onerror = () => resolve([slide.frameId, null]);
+            img.src = slide.imageUrl;
           }),
       ),
     );
-    animImagesRef.current = loaded;
-    return loaded;
+    const map = new Map<string, HTMLImageElement | null>(entries);
+    animImageMapRef.current = map;
+    return map;
   };
 
   const drawAnimaticFrame = (
@@ -1399,113 +1476,58 @@ export default function AnimateStep({
     w: number,
     h: number,
     elapsedSec: number,
-    items: typeof animImagesRef.current,
-    panelDur: number,
+    imgMap: Map<string, HTMLImageElement | null>,
   ) => {
-    ctx.fillStyle = "#080a0f";
-    ctx.fillRect(0, 0, w, h);
-    if (items.length === 0) return;
+    if (motionTimeline.slides.length === 0) {
+      ctx.fillStyle = "#080a0f";
+      ctx.fillRect(0, 0, w, h);
+      return;
+    }
+    const { offFrom, offTo } = ensureOffscreenCanvases();
+    drawMotionFrame({
+      ctx,
+      offFrom,
+      offTo,
+      imageMap: imgMap,
+      timeline: motionTimeline,
+      elapsedSec,
+      showBadge: showPanelBadgeRef.current,
+      showSubtitles: true,
+      showProgress: true,
+    });
 
-    const totalDur = items.length * panelDur;
-    const t = Math.max(0, Math.min(elapsedSec, totalDur - 0.001));
-    const idx = Math.min(items.length - 1, Math.floor(t / panelDur));
-    const localT = (t - idx * panelDur) / panelDur; // 0..1
-    const fadeSec = Math.min(0.6, panelDur * 0.22);
-
+    const totalDur = motionTimeline.totalDuration;
+    const t = Math.max(0, Math.min(elapsedSec, Math.max(0, totalDur - 0.001)));
     const smoothStep = (p: number) => 0.5 - 0.5 * Math.cos(Math.PI * Math.max(0, Math.min(1, p)));
-
-    const renderCover = (im: HTMLImageElement, progress: number, modeIdx: number, alpha: number) => {
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      const e = smoothStep(progress);
-      const pattern = modeIdx % 6;
-      const panLimitX = w * 0.022;
-      const panLimitY = h * 0.018;
-      let zoom = 1.07;
-      let panX = 0;
-      let panY = 0;
-
-      if (pattern === 0) {
-        zoom = 1.05 + e * 0.08;
-      } else if (pattern === 1) {
-        zoom = 1.13 - e * 0.075;
-        panX = (e - 0.5) * panLimitX * 1.3;
-      } else if (pattern === 2) {
-        zoom = 1.06 + e * 0.07;
-        panX = (0.5 - e) * panLimitX * 1.4;
-      } else if (pattern === 3) {
-        zoom = 1.06 + e * 0.07;
-        panY = (0.5 - e) * panLimitY * 1.4;
-      } else if (pattern === 4) {
-        zoom = 1.12 - e * 0.065;
-        panY = (e - 0.5) * panLimitY * 1.2;
-      } else {
-        zoom = 1.05 + e * 0.075;
-        panX = (e - 0.5) * panLimitX;
-      }
-
-      const baseScale = Math.max(w / im.naturalWidth, h / im.naturalHeight) * zoom;
-      const dw = im.naturalWidth * baseScale;
-      const dh = im.naturalHeight * baseScale;
-      const dx = (w - dw) / 2 + panX;
-      const dy = (h - dh) / 2 + panY;
-      ctx.drawImage(im, dx, dy, dw, dh);
-      ctx.restore();
-    };
-
-    const cur = items[idx];
-    if (cur.img) {
-      renderCover(cur.img, localT, idx, 1);
-    }
-
-    // Smooth crossfade transition into next panel near the end of each panel
-    const remainingInPanel = (idx + 1) * panelDur - t;
-    if (remainingInPanel < fadeSec && idx + 1 < items.length) {
-      const next = items[idx + 1];
-      const mix = smoothStep(1 - remainingInPanel / fadeSec);
-      if (next.img) {
-        renderCover(next.img, 0, idx + 1, Math.max(0, Math.min(1, mix)));
-      }
-    }
 
     // Live animated atmosphere particles (rain / golden bokeh / twilight mist / snow)
     drawAnimaticAtmosphere(ctx, w, h, t, animAtmosphereRef.current);
 
-    // Subtle cinema edge vignette for anime film depth
-    ctx.save();
-    const vig = ctx.createRadialGradient(w * 0.5, h * 0.48, Math.min(w, h) * 0.34, w * 0.5, h * 0.5, Math.max(w, h) * 0.72);
-    vig.addColorStop(0, "rgba(0, 0, 0, 0)");
-    vig.addColorStop(1, "rgba(4, 7, 14, 0.34)");
-    ctx.fillStyle = vig;
-    ctx.fillRect(0, 0, w, h);
-    ctx.restore();
-
-    // Optional Cinema Opening Title Card (first 3.4s)
-    if (showTitleCardRef.current && totalDur >= 3.5 && t < 3.4) {
+    // Optional Cinema Opening Title Card (first 3.2s)
+    if (showTitleCardRef.current && totalDur >= 3.2 && t < 3.2) {
       let cardAlpha = 1;
-      if (t < 0.85) cardAlpha = smoothStep(Math.max(0, (t - 0.15) / 0.7));
-      else if (t > 2.55) cardAlpha = 1 - smoothStep((t - 2.55) / 0.85);
-
+      if (t < 0.8) cardAlpha = smoothStep(Math.max(0, (t - 0.12) / 0.68));
+      else if (t > 2.4) cardAlpha = 1 - smoothStep((t - 2.4) / 0.8);
       if (cardAlpha > 0.01) {
         ctx.save();
         ctx.globalAlpha = cardAlpha;
         const bandGrad = ctx.createLinearGradient(0, h * 0.28, 0, h * 0.68);
         bandGrad.addColorStop(0, "rgba(7, 10, 18, 0)");
-        bandGrad.addColorStop(0.5, "rgba(7, 10, 18, 0.62)");
+        bandGrad.addColorStop(0.5, "rgba(7, 10, 18, 0.65)");
         bandGrad.addColorStop(1, "rgba(7, 10, 18, 0)");
         ctx.fillStyle = bandGrad;
         ctx.fillRect(0, h * 0.28, w, h * 0.4);
 
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        const kickerSize = Math.max(11, Math.round(h * 0.022));
-        ctx.font = `700 ${kickerSize}px system-ui, -apple-system, sans-serif`;
+        const kickerSize = Math.max(14, Math.round(Math.min(w, h) * 0.022));
+        ctx.font = `700 ${kickerSize}px "Bahnschrift", "Segoe UI", sans-serif`;
         ctx.fillStyle = "#f2be6b";
         ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
-        ctx.shadowBlur = 10;
+        ctx.shadowBlur = 12;
         ctx.fillText("NMCGEN CINEMA STORYBOARD", w / 2, h * 0.43);
 
-        const titleSize = Math.max(22, Math.round(h * 0.062));
+        const titleSize = Math.max(28, Math.round(Math.min(w, h) * 0.064));
         ctx.font = `700 ${titleSize}px Georgia, "Times New Roman", serif`;
         ctx.fillStyle = "#ffffff";
         const titleWords = (project.name || "Proyek nmcGen").trim().split(/\s+/);
@@ -1529,105 +1551,37 @@ export default function AnimateStep({
       }
     }
 
-    ctx.save();
-    // Optional top-left panel badge (off by default for clean cinema film look)
-    if (showPanelBadgeRef.current) {
-      const pNum = cur.frame.panelNumber ?? idx + 1;
-      const badge = `SEGMEN ${String(cur.segIdx).padStart(2, "0")} · PANEL ${pNum}: ${(cur.frame.title || "").toUpperCase()}`;
-      ctx.font = `700 ${Math.round(h * 0.023)}px system-ui, -apple-system, sans-serif`;
-      const bw = Math.min(w - 36, ctx.measureText(badge).width + 24);
-      const bh = Math.round(h * 0.048);
-      ctx.fillStyle = "rgba(10, 12, 18, 0.68)";
-      ctx.fillRect(18, 16, bw, bh);
-      ctx.fillStyle = "#f4ece0";
-      ctx.textBaseline = "middle";
-      ctx.fillText(badge, 30, 16 + bh / 2, bw - 22);
-    }
-
-    // Clean Cinema Film Subtitle at bottom (soft gradient scrim + crisp outlined white text)
-    const dlg = cur.frame.dialogue.trim();
-    if (dlg) {
-      let subAlpha = 1;
-      if (localT < 0.08) subAlpha = localT / 0.08;
-      else if (remainingInPanel < fadeSec * 0.8) subAlpha = Math.max(0, remainingInPanel / (fadeSec * 0.8));
-
-      ctx.globalAlpha = Math.max(0, Math.min(1, subAlpha));
-      const fontSize = Math.max(15, Math.round(h * 0.036));
-      ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
-      const maxWidth = w * 0.84;
-      const words = dlg.split(/\s+/);
-      const wrapped: string[] = [];
-      let line = "";
-      for (const word of words) {
-        const test = line ? `${line} ${word}` : word;
-        if (ctx.measureText(test).width > maxWidth && line) {
-          wrapped.push(line);
-          line = word;
-        } else {
-          line = test;
-        }
-      }
-      if (line) wrapped.push(line);
-
-      const lineH = Math.round(fontSize * 1.36);
-      const blockH = wrapped.length * lineH;
-      const scrimTop = h - blockH - Math.round(h * 0.14);
-      const scrim = ctx.createLinearGradient(0, scrimTop, 0, h);
-      scrim.addColorStop(0, "rgba(6, 8, 14, 0)");
-      scrim.addColorStop(0.55, "rgba(6, 8, 14, 0.54)");
-      scrim.addColorStop(1, "rgba(6, 8, 14, 0.76)");
-      ctx.fillStyle = scrim;
-      ctx.fillRect(0, scrimTop, w, h - scrimTop);
-
-      ctx.textAlign = "center";
-      ctx.textBaseline = "alphabetic";
-      ctx.lineJoin = "round";
-      ctx.lineWidth = Math.max(3, Math.round(h * 0.008));
-      ctx.strokeStyle = "rgba(6, 8, 14, 0.9)";
-      ctx.shadowColor = "rgba(0, 0, 0, 0.78)";
-      ctx.shadowBlur = 8;
-      ctx.fillStyle = "#ffffff";
-
-      const baseY = h - Math.round(h * 0.055) - (wrapped.length - 1) * lineH;
-      wrapped.forEach((ln, li) => {
-        const y = baseY + li * lineH;
-        ctx.strokeText(ln, w / 2, y);
-        ctx.fillText(ln, w / 2, y);
-      });
-    }
-    ctx.restore();
-
-    // Smooth film fade-in from black (0.7s) & fade-out to black (1.0s)
-    const fadeInDur = Math.min(0.7, totalDur * 0.15);
-    const fadeOutDur = Math.min(1.0, totalDur * 0.2);
+    // Smooth film fade-in / fade-out
+    const fadeInDur = Math.min(0.6, totalDur * 0.14);
+    const fadeOutDur = Math.min(0.85, totalDur * 0.18);
     let blackAlpha = 0;
-    if (t < fadeInDur) {
-      blackAlpha = 1 - t / fadeInDur;
-    } else if (totalDur - t < fadeOutDur) {
-      blackAlpha = 1 - (totalDur - t) / fadeOutDur;
-    }
+    if (t < fadeInDur) blackAlpha = 1 - t / fadeInDur;
+    else if (totalDur - t < fadeOutDur) blackAlpha = 1 - (totalDur - t) / fadeOutDur;
     if (blackAlpha > 0.005) {
       ctx.fillStyle = `rgba(4, 6, 10, ${Math.max(0, Math.min(1, blackAlpha)).toFixed(3)})`;
       ctx.fillRect(0, 0, w, h);
     }
   };
 
-  // Draw static preview whenever entering Animatic tab or toggling atmosphere / title / badge
+  // Draw static preview whenever entering tab or tweaking settings
   useEffect(() => {
-    if (engineTab !== "animatic" || renderedFrames.length === 0 || animPlaying || animRecording) return;
+    if (engineTab !== "animatic" || motionTimeline.slides.length === 0 || animPlaying || animRecording) return;
     let active = true;
-    void loadAnimaticImages().then((items) => {
+    void loadAnimaticImages().then((imgMap) => {
       if (!active || !canvasRef.current) return;
       const ctx = canvasRef.current.getContext("2d");
       if (!ctx) return;
-      const previewSec = Math.min(items.length * secPerPanel * 0.35, showTitleCard ? 1.45 : 1.0);
-      drawAnimaticFrame(ctx, canvasRef.current.width, canvasRef.current.height, previewSec, items, secPerPanel);
+      const previewSec =
+        animElapsedSec > 0
+          ? Math.min(animElapsedSec, Math.max(0, motionTimeline.totalDuration - 0.01))
+          : Math.min(motionTimeline.totalDuration * 0.35, showTitleCard ? 1.45 : 1.0);
+      drawAnimaticFrame(ctx, canvasRef.current.width, canvasRef.current.height, previewSec, imgMap);
     });
     return () => {
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engineTab, renderedFrames.length, sb.aspectRatio, animAtmosphere, showTitleCard, showPanelBadge, secPerPanel]);
+  }, [engineTab, motionTimeline, sb.aspectRatio, animAtmosphere, showTitleCard, showPanelBadge]);
 
   const stopAnimatic = () => {
     if (animRafRef.current) {
@@ -1657,20 +1611,31 @@ export default function AnimateStep({
     setAnimPlaying(false);
   };
 
-  const runAnimaticPlayback = async (recordWebm: boolean) => {
-    if (!canvasRef.current || renderedFrames.length === 0) return;
+  const handleScrubPreview = (nextSec: number) => {
+    if (animPlaying || animRecording) stopAnimatic();
+    setAnimElapsedSec(nextSec);
+    setAnimProgress(motionTimeline.totalDuration > 0 ? (nextSec / motionTimeline.totalDuration) * 100 : 0);
+    if (!canvasRef.current) return;
+    const ctx = canvasRef.current.getContext("2d");
+    if (!ctx) return;
+    drawAnimaticFrame(ctx, canvasRef.current.width, canvasRef.current.height, nextSec, animImageMapRef.current);
+  };
+
+  const runAnimaticPlayback = async (recordVideo: boolean) => {
+    if (!canvasRef.current || motionTimeline.slides.length === 0) return;
     stopAnimatic();
-    const items = await loadAnimaticImages();
+    setGlobalError("");
+    const imgMap = await loadAnimaticImages();
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const totalDur = items.length * secPerPanel;
+    const totalDur = motionTimeline.totalDuration;
     let recorder: MediaRecorder | null = null;
     let audioCtx: AudioContext | null = null;
     const chunks: BlobPart[] = [];
+    const { mimeType, ext } = pickBrowserVideoMime();
 
-    // Prepare audio: custom uploaded BGM takes precedence; otherwise built-in 0-credit Web Audio soundtrack
     let audioEl: HTMLAudioElement | null = null;
     if (bgmUrl) {
       audioEl = new Audio(bgmUrl);
@@ -1682,9 +1647,9 @@ export default function AnimateStep({
     const useBuiltInScore = !audioEl && animScore !== "none";
     let mediaAudioDest: MediaStreamAudioDestinationNode | null = null;
 
-    if (recordWebm) {
+    if (recordVideo) {
       if (typeof MediaRecorder === "undefined" || typeof canvas.captureStream !== "function") {
-        setGlobalError("Browser ini tidak mendukung perekaman WebM langsung.");
+        setGlobalError("Browser ini tidak mendukung perekaman video langsung.");
         return;
       }
       const videoStream = canvas.captureStream(30);
@@ -1719,22 +1684,17 @@ export default function AnimateStep({
         ]);
       }
 
-      const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
-        ? "video/webm;codecs=vp9,opus"
-        : MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-          ? "video/webm;codecs=vp9"
-          : "video/webm";
-      recorder = new MediaRecorder(combinedStream, { mimeType: mime, videoBitsPerSecond: 5_000_000 });
+      recorder = new MediaRecorder(combinedStream, { mimeType, videoBitsPerSecond: 8_000_000 });
       recorder.ondataavailable = (ev) => {
         if (ev.data.size > 0) chunks.push(ev.data);
       };
       const scoreMeta = ANIMATIC_SCORES.find((s) => s.value === animScore);
       const audioLabel = bgmName ? " + Musik" : useBuiltInScore ? ` + ${scoreMeta?.label.split(" (")[0] || "Musik"}` : "";
       recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: "video/webm" });
+        const blob = new Blob(chunks, { type: ext === "mp4" ? "video/mp4" : "video/webm" });
         const safeName =
           (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
-          "-cinema-animatic.webm";
+          `-cinema-1080p.${ext}`;
         downloadBlob(blob, safeName);
         setAnimRecording(false);
         if (scoreCtrlRef.current) {
@@ -1745,7 +1705,9 @@ export default function AnimateStep({
           void audioCtx.close().catch(() => {});
           if (animAudioCtxRef.current === audioCtx) animAudioCtxRef.current = null;
         }
-        setGlobalNotice(`Cinema Animatic WebM (${totalDur.toFixed(1)} dtk${audioLabel}) berhasil diunduh!`);
+        setGlobalNotice(
+          `Video 1080p (${ext.toUpperCase()}, ${totalDur.toFixed(1)} dtk${audioLabel}) berhasil diunduh tanpa Veo/Flow!`,
+        );
       };
       setAnimRecording(true);
       recorder.start();
@@ -1772,16 +1734,17 @@ export default function AnimateStep({
 
     const tick = (now: number) => {
       const elapsed = (now - startTs) / 1000;
-      const pct = Math.min(100, (elapsed / totalDur) * 100);
-      setAnimProgress(pct);
-      drawAnimaticFrame(ctx, canvas.width, canvas.height, elapsed, items, secPerPanel);
+      const clamped = Math.min(totalDur, elapsed);
+      setAnimElapsedSec(clamped);
+      setAnimProgress(totalDur > 0 ? Math.min(100, (clamped / totalDur) * 100) : 0);
+      drawAnimaticFrame(ctx, canvas.width, canvas.height, clamped, imgMap);
 
-      // Optional live Indonesian SpeechSynthesis voiceover preview per panel
-      if (!recordWebm && speakDialogueRef.current && typeof window !== "undefined" && "speechSynthesis" in window) {
-        const curIdx = Math.min(items.length - 1, Math.floor(Math.max(0, elapsed) / secPerPanel));
+      if (!recordVideo && speakDialogueRef.current && typeof window !== "undefined" && "speechSynthesis" in window) {
+        const sampled = sampleMotionTimeline(motionTimeline, clamped);
+        const curIdx = sampled?.primary.index ?? 0;
         if (curIdx !== lastSpokenPanelIdxRef.current) {
           lastSpokenPanelIdxRef.current = curIdx;
-          const dlg = items[curIdx]?.frame.dialogue.trim();
+          const dlg = sampled?.primary.caption || "";
           try {
             window.speechSynthesis.cancel();
             if (dlg) {
@@ -1822,8 +1785,119 @@ export default function AnimateStep({
     animRafRef.current = requestAnimationFrame(tick);
   };
 
-  const canvasW = sb.aspectRatio === "9:16" ? 540 : 960;
-  const canvasH = sb.aspectRatio === "9:16" ? 960 : 540;
+  // Render deterministic 1080p H.264/AAC MP4 via local Chrome Headless CDP + FFmpeg API route
+  const handleRenderLocalCdpMp4 = async () => {
+    if (motionTimeline.slides.length === 0) return;
+    stopAnimatic();
+    setLocalMp4Busy(true);
+    setGlobalError("");
+    setGlobalNotice(
+      `Merender ${motionTimeline.slides.length} panel (${motionTimeline.totalDuration.toFixed(1)} dtk @ 30fps, ${motionTimeline.width}x${motionTimeline.height}) memakai Chrome D3D11 + FFmpeg lokal...`,
+    );
+
+    try {
+      let audioDataUrl: string | undefined;
+      let audioExt: string | undefined;
+      if (bgmFileRef.current) {
+        const f = bgmFileRef.current;
+        audioExt = f.name.split(".").pop() || "mp3";
+        audioDataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(new Error("Gagal membaca file audio kustom."));
+          reader.readAsDataURL(f);
+        });
+      }
+
+      const spec = buildLocalCdpStoryboardSpec(
+        project,
+        motionTimeline,
+        motionOptions,
+        audioDataUrl ? `bgm.${audioExt || "mp3"}` : null,
+      );
+
+      const res = await fetch("/api/render/local", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          spec,
+          images: motionTimeline.slides.map((s) => ({ fileName: s.fileName, dataUrl: s.imageUrl })),
+          audioDataUrl,
+          audioExt,
+        }),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(errJson.error || `Render MP4 lokal gagal (${res.status}).`);
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      blobUrlsRef.current.push(url);
+      setLocalMp4Blob(blob);
+      setLocalMp4Url(url);
+
+      const metaHeader = res.headers.get("X-Nmcgen-Render-Meta");
+      let metaText = `${motionTimeline.width}x${motionTimeline.height} · ${motionTimeline.totalDuration.toFixed(1)} dtk`;
+      if (metaHeader) {
+        try {
+          const m = JSON.parse(metaHeader) as {
+            width?: number;
+            height?: number;
+            fps?: number;
+            durationSec?: number;
+            renderSec?: number;
+          };
+          metaText = `${m.width || motionTimeline.width}x${m.height || motionTimeline.height} @ ${m.fps || 30}fps · ${m.durationSec ?? motionTimeline.totalDuration.toFixed(1)} dtk (selesai ${m.renderSec ?? "?"} dtk)`;
+        } catch {
+          // ignore
+        }
+      }
+      setLocalMp4Meta(metaText);
+      setGlobalNotice(`Render MP4 1080p lokal selesai! (${metaText}).`);
+    } catch (err) {
+      setGlobalError(`Render MP4 lokal gagal: ${(err as Error).message}`);
+    } finally {
+      setLocalMp4Busy(false);
+    }
+  };
+
+  // Download self-contained local Chrome CDP + FFmpeg render pack (.zip) usable even from Cloudflare Web deploy
+  const handleDownloadLocalRenderPackZip = async () => {
+    if (motionTimeline.slides.length === 0) return;
+    setLocalPackBusy(true);
+    setGlobalError("");
+    try {
+      const scriptRes = await fetch("/scripts/render_motion_cdp.py");
+      if (!scriptRes.ok) {
+        throw new Error("Gagal mengambil skrip render_motion_cdp.py.");
+      }
+      const renderScriptText = await scriptRes.text();
+      const bytes = buildLocalMotionRenderPackZip({
+        project,
+        timeline: motionTimeline,
+        options: motionOptions,
+        renderScriptText,
+      });
+      const copy = new Uint8Array(bytes.byteLength);
+      copy.set(bytes);
+      const slug =
+        (project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "nmcgen") +
+        "-render-mp4-pack.zip";
+      downloadBlob(new Blob([copy], { type: "application/zip" }), slug);
+      setGlobalNotice(
+        `Paket Render MP4 Lokal (${motionTimeline.slides.length} panel + render_motion_cdp.py + render_mp4.bat) berhasil diunduh.`,
+      );
+    } catch (err) {
+      setGlobalError(`Gagal membuat paket ZIP render lokal: ${(err as Error).message}`);
+    } finally {
+      setLocalPackBusy(false);
+    }
+  };
+
+  const canvasW = motionTimeline.width;
+  const canvasH = motionTimeline.height;
 
   return (
     <div className="stepContainer">
@@ -1881,8 +1955,25 @@ export default function AnimateStep({
         </div>
       ) : (
         <>
-          {/* Engine Mode Tabs */}
+          {/* Engine Mode Tabs: Local Cinema Motion Renderer first (zero Veo/Flow) */}
           <div className="animateEngineBar" role="tablist" aria-label="Pilih cara pembuatan video">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={engineTab === "animatic"}
+              className="animateEngineTab"
+              data-active={engineTab === "animatic"}
+              onClick={() => selectEngineTab("animatic")}
+            >
+              <div className="animateEngineTop">
+                <strong>Mesin Render Lokal (0 Kredit)</strong>
+                <span className="metaTag mono" data-tone="ok">
+                  {localCdpReady ? "MP4 1080p Siap" : "Tanpa Veo/Flow"}
+                </span>
+              </div>
+              <span>Render langsung dari panel gambar dengan gerak kamera, transisi, efek atmosfer &amp; audio.</span>
+            </button>
+
             <button
               type="button"
               role="tab"
@@ -1897,7 +1988,7 @@ export default function AnimateStep({
                   {watchFolderName ? "Pantau Aktif" : `${readyClips.length}/${plans.length} video`}
                 </span>
               </div>
-              <span>Buat video gratis di flow.google.com, lalu pasang MP4 ke sini.</span>
+              <span>Opsional: buat video AI di flow.google.com, lalu pasang MP4 ke sini.</span>
             </button>
 
             <button
@@ -1914,22 +2005,7 @@ export default function AnimateStep({
                   {omniKeyAvailable ? "Siap" : "Butuh API Key"}
                 </span>
               </div>
-              <span>Render video + suara otomatis langsung di halaman ini.</span>
-            </button>
-
-            <button
-              type="button"
-              role="tab"
-              aria-selected={engineTab === "animatic"}
-              className="animateEngineTab"
-              data-active={engineTab === "animatic"}
-              onClick={() => selectEngineTab("animatic")}
-            >
-              <div className="animateEngineTop">
-                <strong>Cinema Animatic (0 Kredit)</strong>
-                <span className="metaTag mono" data-tone="ok">Gratis · 0 Kredit</span>
-              </div>
-              <span>Efek hujan/cahaya, musik piano bawaan, &amp; ekspor WebM langsung di browser.</span>
+              <span>Opsional: render video AI lewat Gemini Omni 1.2 Flash API.</span>
             </button>
           </div>
 
@@ -2854,16 +2930,19 @@ export default function AnimateStep({
           ) : null}
 
           {/* =============================================================== */}
-          {/* TAB 3: FREE IN-BROWSER CINEMA ANIMATIC (0 KREDIT + AUDIO WEBM)  */}
+          {/* TAB 1: CINEMA ANIMATIC + LOCAL CHROME CDP/FFMPEG MP4 ENGINE     */}
           {/* =============================================================== */}
           {engineTab === "animatic" ? (
             <section className="panelCard animaticCard">
               <div className="panelHead">
                 <div>
-                  <h3>Cinema Animatic ({renderedFrames.length} Panel · 0 Kredit)</h3>
+                  <h3>
+                    Mesin Render Lokal &amp; Cinema Animatic ({motionTimeline.slides.length} Panel ·{" "}
+                    {motionTimeline.totalDuration.toFixed(1)} dtk · {canvasW}×{canvasH})
+                  </h3>
                   <p className="fieldHint">
-                    Gaya film anime langsung di browser dengan gerak kamera sinematik, efek atmosfer, musik latar bawaan,
-                    dan ekspor video WebM beraudio.
+                    Render langsung dari panel gambar storyboard dengan gerak kamera Ken Burns, transisi halus, efek
+                    atmosfer, musik bawaan, dan ekspor 1080p tanpa Veo atau Google Flow.
                   </p>
                 </div>
 
@@ -2873,7 +2952,7 @@ export default function AnimateStep({
                     <select
                       className="select inputSm"
                       value={bgmName ? "none" : animScore}
-                      disabled={animPlaying || animRecording || Boolean(bgmName)}
+                      disabled={animPlaying || animRecording || localMp4Busy || Boolean(bgmName)}
                       onChange={(e) => setAnimScore(e.target.value as AnimaticScorePreset)}
                       aria-label="Pilih musik latar bawaan 0 kredit"
                     >
@@ -2890,15 +2969,84 @@ export default function AnimateStep({
                     <select
                       className="select inputSm"
                       value={secPerPanel}
-                      disabled={animPlaying || animRecording}
+                      disabled={animPlaying || animRecording || localMp4Busy}
                       onChange={(e) => setSecPerPanel(Number(e.target.value))}
                     >
                       <option value={2.5}>2,5 dtk (Cepat)</option>
                       <option value={3.5}>3,5 dtk (Standar)</option>
-                      <option value={5}>5,0 dtk (Sinematik)</option>
+                      <option value={4.5}>4,5 dtk (Sinematik)</option>
+                      <option value={6}>6,0 dtk (Santai)</option>
                     </select>
                   </label>
                 </div>
+              </div>
+
+              <div className="animaticControlGrid">
+                <label className="inlineControl">
+                  <span className="fieldLabel">Cakupan:</span>
+                  <select
+                    className="select inputSm"
+                    value={motionSegmentId}
+                    disabled={animPlaying || animRecording || localMp4Busy}
+                    onChange={(e) => {
+                      setMotionSegmentId(e.target.value);
+                      setAnimElapsedSec(0);
+                      setAnimProgress(0);
+                    }}
+                  >
+                    <option value="all">Semua Segmen ({renderedFrames.length} panel)</option>
+                    {segments.map((seg) => (
+                      <option key={seg.id} value={seg.id}>
+                        Segmen {String(seg.index).padStart(2, "0")}: {seg.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="inlineControl">
+                  <span className="fieldLabel">Gerak Kamera:</span>
+                  <select
+                    className="select inputSm"
+                    value={motionPreset}
+                    disabled={animPlaying || animRecording || localMp4Busy}
+                    onChange={(e) => setMotionPreset(e.target.value as MotionPreset)}
+                  >
+                    {MOTION_PRESET_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="inlineControl">
+                  <span className="fieldLabel">Transisi:</span>
+                  <select
+                    className="select inputSm"
+                    value={transitionPreset}
+                    disabled={animPlaying || animRecording || localMp4Busy}
+                    onChange={(e) => setTransitionPreset(e.target.value as TransitionPreset)}
+                  >
+                    {TRANSITION_PRESET_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="inlineControl">
+                  <span className="fieldLabel">Bingkai:</span>
+                  <select
+                    className="select inputSm"
+                    value={fitMode}
+                    disabled={animPlaying || animRecording || localMp4Busy}
+                    onChange={(e) => setFitMode(e.target.value as MotionFitMode)}
+                  >
+                    <option value="cover">Penuh (Cover)</option>
+                    <option value="contain-blur">Utuh + Blur Latar</option>
+                  </select>
+                </label>
               </div>
 
               {/* Atmosphere quick pills */}
@@ -2911,7 +3059,7 @@ export default function AnimateStep({
                       type="button"
                       className="segBtn"
                       aria-selected={animAtmosphere === atm.value}
-                      disabled={animRecording}
+                      disabled={animRecording || localMp4Busy}
                       onClick={() => setAnimAtmosphere(atm.value)}
                     >
                       {atm.label}
@@ -2938,7 +3086,7 @@ export default function AnimateStep({
                     <button
                       type="button"
                       className="btn btnGhost btnSm"
-                      disabled={animPlaying || animRecording}
+                      disabled={animPlaying || animRecording || localMp4Busy}
                       onClick={handleClearBgm}
                     >
                       Pakai Musik Bawaan
@@ -2947,9 +3095,9 @@ export default function AnimateStep({
                 </div>
               ) : null}
 
-              {renderedFrames.length === 0 ? (
+              {motionTimeline.slides.length === 0 ? (
                 <div className="emptyPanel">
-                  <p>Buat minimal 1 gambar panel di Tahap 3 untuk memutar Cinema Animatic di browser.</p>
+                  <p>Buat minimal 1 gambar panel di Tahap 3 untuk memutar dan merender video lokal.</p>
                 </div>
               ) : (
                 <>
@@ -2960,6 +3108,22 @@ export default function AnimateStep({
                       height={canvasH}
                       className="animaticCanvas"
                     />
+                  </div>
+
+                  <div className="animaticScrubRow">
+                    <span className="fieldHint mono">{animElapsedSec.toFixed(1)}s</span>
+                    <input
+                      type="range"
+                      aria-label="Geser posisi waktu preview video"
+                      className="animaticScrubber"
+                      min={0}
+                      max={Math.max(0.1, motionTimeline.totalDuration)}
+                      step={0.05}
+                      value={Math.min(animElapsedSec, motionTimeline.totalDuration)}
+                      disabled={animRecording || localMp4Busy}
+                      onChange={(e) => handleScrubPreview(Number(e.target.value))}
+                    />
+                    <span className="fieldHint mono">{motionTimeline.totalDuration.toFixed(1)}s</span>
                   </div>
 
                   <div className="animaticProgressTrack" aria-label="Progres animatic">
@@ -2974,29 +3138,88 @@ export default function AnimateStep({
                     ) : (
                       <button
                         type="button"
-                        className="btn btnPrimary"
-                        disabled={animRecording}
+                        className="btn"
+                        disabled={animRecording || localMp4Busy}
                         onClick={() => void runAnimaticPlayback(false)}
                       >
                         <PlayIcon size={14} />
-                        <span>Putar Cinema Preview ({(renderedFrames.length * secPerPanel).toFixed(1)} dtk)</span>
+                        <span>Putar Preview ({motionTimeline.totalDuration.toFixed(1)} dtk)</span>
                       </button>
                     )}
 
+                    {localCdpReady ? (
+                      <button
+                        type="button"
+                        className="btn btnPrimary"
+                        disabled={animPlaying || animRecording || localMp4Busy}
+                        onClick={() => void handleRenderLocalCdpMp4()}
+                        title="Render MP4 1080p deterministik (0 drop frame) memakai Chrome D3D11 + FFmpeg di komputer ini"
+                      >
+                        <FilmIcon size={14} />
+                        <span>
+                          {localMp4Busy
+                            ? "Merender MP4 1080p..."
+                            : "Render MP4 1080p (Chrome + FFmpeg)"}
+                        </span>
+                      </button>
+                    ) : null}
+
                     <button
                       type="button"
-                      className="btn"
-                      disabled={animPlaying || animRecording}
+                      className={localCdpReady ? "btn" : "btn btnPrimary"}
+                      disabled={animPlaying || animRecording || localMp4Busy}
                       onClick={() => void runAnimaticPlayback(true)}
                     >
                       <DownloadIcon size={14} />
                       <span>
                         {animRecording
-                          ? "Merekam Video WebM..."
-                          : `Unduh Video (.webm${bgmName || animScore !== "none" ? " + Audio" : ""})`}
+                          ? "Merekam 1080p..."
+                          : `Rekam & Unduh 1080p${bgmName || animScore !== "none" ? " + Audio" : ""}`}
                       </span>
                     </button>
+
+                    <button
+                      type="button"
+                      className="btn btnGhost"
+                      disabled={animPlaying || animRecording || localMp4Busy || localPackBusy}
+                      onClick={() => void handleDownloadLocalRenderPackZip()}
+                      title="Unduh paket ZIP berisi gambar, storyboard.json, render_motion_cdp.py, dan render_mp4.bat"
+                    >
+                      <DownloadIcon size={14} />
+                      <span>{localPackBusy ? "Menyiapkan ZIP..." : "Unduh Paket Render MP4 (.zip)"}</span>
+                    </button>
                   </div>
+
+                  {localMp4Url ? (
+                    <div className="panelCard omniReelCard" style={{ marginTop: 4 }}>
+                      <div className="panelHead">
+                        <div className="metaInline">
+                          <FilmIcon size={15} />
+                          <strong>Hasil Render MP4 Lokal</strong>
+                          {localMp4Meta ? <span className="metaTag mono">{localMp4Meta}</span> : null}
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btnPrimary btnSm"
+                          onClick={() => {
+                            if (!localMp4Blob) return;
+                            const slug =
+                              project.name
+                                .toLowerCase()
+                                .replace(/[^a-z0-9]+/g, "-")
+                                .replace(/^-|-$/g, "") || "nmcgen";
+                            downloadBlob(localMp4Blob, `${slug}-1080p.mp4`);
+                          }}
+                        >
+                          <DownloadIcon size={13} />
+                          <span>Unduh MP4</span>
+                        </button>
+                      </div>
+                      <div className="omniReelStage">
+                        <video src={localMp4Url} controls playsInline className="omniVideoPlayer" />
+                      </div>
+                    </div>
+                  ) : null}
 
                   {/* Collapsible Cinema details: Title card, panel badge, volume, voiceover & custom MP3 */}
                   <details className="subtleDetails animateCompactDetails">
@@ -3011,7 +3234,7 @@ export default function AnimateStep({
                           <input
                             type="checkbox"
                             checked={showTitleCard}
-                            disabled={animRecording}
+                            disabled={animRecording || localMp4Busy}
                             onChange={(e) => setShowTitleCard(e.target.checked)}
                           />
                           <span>Kartu Judul Pembuka</span>
@@ -3021,7 +3244,7 @@ export default function AnimateStep({
                           <input
                             type="checkbox"
                             checked={showPanelBadge}
-                            disabled={animRecording}
+                            disabled={animRecording || localMp4Busy}
                             onChange={(e) => setShowPanelBadge(e.target.checked)}
                           />
                           <span>Label Nomor Panel</span>
@@ -3030,7 +3253,7 @@ export default function AnimateStep({
                         <label
                           className="inlineControl"
                           style={{ cursor: "pointer" }}
-                          title="Bacakan dialog Indonesia lewat suara browser saat Putar Preview (tidak terekam ke berkas WebM)"
+                          title="Bacakan dialog Indonesia lewat suara browser saat Putar Preview"
                         >
                           <input
                             type="checkbox"
@@ -3062,7 +3285,7 @@ export default function AnimateStep({
                         <button
                           type="button"
                           className="btn btnSm"
-                          disabled={animPlaying || animRecording}
+                          disabled={animPlaying || animRecording || localMp4Busy}
                           onClick={() => bgmInputRef.current?.click()}
                         >
                           <UploadIcon size={13} />

@@ -93,6 +93,15 @@ import {
 } from "./flowImageConnector.ts";
 import { ANIMATIC_ATMOSPHERES, ANIMATIC_SCORES } from "./animaticAudio.ts";
 import type { NmcProject, SegmentNodeData } from "./types.ts";
+import {
+  buildLocalCdpStoryboardSpec,
+  buildLocalMotionRenderPackZip,
+  buildMotionTimeline,
+  computeFitRect,
+  computeMotionTransform,
+  fullHdDimsForAspect,
+  sampleMotionTimeline,
+} from "./motionEngine.ts";
 
 // Synthetic test fixture built in test code only (no hardcoded sample in app source)
 function makeFixtureProject(): NmcProject {
@@ -1087,5 +1096,65 @@ assert.equal(
 
 // When previousFrame IS safe to use (MS -> MS same character), prompt explicitly warns against cloning pose/layout
 assert.ok(composedF2.prompt.includes("never copy its layout or pose"));
+
+// 19. Local Motion Engine (Zero Veo/Flow deterministic Canvas2D + Chrome CDP/FFmpeg MP4 pipeline)
+assert.deepEqual(fullHdDimsForAspect("9:16"), { width: 1080, height: 1920 });
+assert.deepEqual(fullHdDimsForAspect("16:9"), { width: 1920, height: 1080 });
+
+const motionOpts = {
+  segmentId: null,
+  secPerPanel: 3.0,
+  transitionSec: 0.6,
+  motionPreset: "auto" as const,
+  motionAmount: 0.12,
+  transitionPreset: "auto" as const,
+  fitMode: "cover" as const,
+  showBadge: true,
+  showSubtitles: true,
+  showProgress: true,
+  fps: 30,
+  audioMode: "synth" as const,
+  audioVolume: 0.8,
+};
+
+const fullMotionTl = buildMotionTimeline(renderedSegmented, motionOpts);
+assert.equal(fullMotionTl.slides.length, 3);
+assert.equal(fullMotionTl.width, 1920);
+assert.equal(fullMotionTl.height, 1080);
+assert.equal(fullMotionTl.slides[0].transition, "cut");
+assert.equal(fullMotionTl.slides[1].transition, "crossfade");
+assert.notEqual(fullMotionTl.slides[2].transition, "crossfade");
+assert.ok(Math.abs(fullMotionTl.totalDuration - (3.0 + 3.0 - 0.6 + 3.0 - 0.6)) < 1e-6);
+
+const seg1OnlyTl = buildMotionTimeline(renderedSegmented, { ...motionOpts, segmentId: seg1Target.id });
+assert.equal(seg1OnlyTl.slides.length, 2);
+
+const midTrans = sampleMotionTimeline(fullMotionTl, 2.7);
+assert.ok(midTrans && midTrans.inTransition);
+assert.equal(midTrans.from?.slide.index, 0);
+assert.equal(midTrans.to.slide.index, 1);
+
+const tfZoom = computeMotionTransform("zoom-in", 0.12, 1);
+assert.ok(Math.abs(tfZoom.scale - 1.12) < 1e-6);
+const fitBlur = computeFitRect(1920, 1080, 1080, 1920, "contain-blur");
+assert.ok(fitBlur.w <= 1080 && fitBlur.h <= 1920);
+
+const cdpSpec = buildLocalCdpStoryboardSpec(renderedSegmented, fullMotionTl, motionOpts, null);
+assert.equal(cdpSpec.slides.length, 3);
+assert.equal(cdpSpec.audio.mode, "synth");
+
+const localPackZip = buildLocalMotionRenderPackZip({
+  project: renderedSegmented,
+  timeline: fullMotionTl,
+  options: motionOpts,
+  renderScriptText: "#!/usr/bin/env python3\nprint('ok')\n",
+});
+assert.equal(localPackZip[0], 0x50);
+assert.equal(localPackZip[1], 0x4b);
+const localPackText = new TextDecoder("latin1").decode(localPackZip);
+assert.ok(localPackText.includes("storyboard.json"));
+assert.ok(localPackText.includes("render_motion_cdp.py"));
+assert.ok(localPackText.includes("render_mp4.bat"));
+assert.ok(localPackText.includes("images/panel_001.jpg"));
 
 console.log("nmcGen pipeline tests: all passed");

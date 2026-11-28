@@ -319,6 +319,7 @@ export interface RuntimeStatus {
   localFfprobe: boolean;
   localPython: boolean;
   localPyCapCut: boolean;
+  localChrome?: boolean;
   ffmpegVersion?: string;
   defaultCapCutDir?: string;
   supabaseConnected?: boolean;

@@ -3042,6 +3042,29 @@ details[open] > .animateDetailsSummary::before {
   transition: width 80ms linear;
 }
 
+.animaticControlGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.animaticScrubRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.animaticScrubber {
+  flex: 1;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .animaticOptionRow {
   display: flex;
   flex-wrap: wrap;
